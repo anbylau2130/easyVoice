@@ -14,11 +14,13 @@ import { listCustomVoices } from './customVoice.service'
 const SETTINGS_FILE = path.resolve(__dirname, '../../data/clone-settings.json')
 
 export interface CloneSettings {
-  /** 克隆 TTS 服务地址，如 http://127.0.0.1:8020 */
+  /** 克隆 TTS 服务地址，如 compose 内 http://xtts-server:8020 */
   baseUrl?: string
-  /** 合成语言，如 zh */
+  /** 合成语言，如 zh-cn */
   language?: string
-  /** 克隆服务拉取参考 wav 的地址前缀（指向 EasyVoice 的 audio 静态服务） */
+  /** 克隆服务容器内说话人目录（挂载的 EasyVoice custom-voices） */
+  speakersDir?: string
+  /** 参考音频 URL 前缀（服务端通过 URL 拉取参考音频时使用） */
   wavUrlPrefix?: string
 }
 
@@ -38,11 +40,19 @@ async function writeSettings(settings: CloneSettings): Promise<void> {
 export async function getCloneSettings(): Promise<Required<CloneSettings>> {
   const stored = await readSettings()
   return {
-    baseUrl: stored.baseUrl || '',
-    language: stored.language || 'zh',
-    // 克隆服务容器通过 host.docker.internal 访问宿主机上的 EasyVoice 静态音频
-    wavUrlPrefix: stored.wavUrlPrefix || 'http://host.docker.internal:3000',
+    baseUrl: stored.baseUrl || process.env.TTS_CLONE_URL || '',
+    language: normalizeLanguage(stored.language || process.env.TTS_CLONE_LANGUAGE || 'zh-cn'),
+    // 克隆服务容器内看到的说话人目录（compose 默认卷挂载路径）
+    speakersDir: stored.speakersDir || process.env.TTS_CLONE_SPEAKERS_DIR || '/app/speakers',
+    wavUrlPrefix: stored.wavUrlPrefix || process.env.TTS_CLONE_WAV_URL_PREFIX || '',
   }
+}
+
+/** daswer123/XTTS 只接受完整语言码：zh -> zh-cn */
+function normalizeLanguage(value: string): string {
+  const v = (value || '').trim().toLowerCase()
+  if (v === 'zh' || v === 'zh-cn' || v === 'chinese') return 'zh-cn'
+  return v || 'zh-cn'
 }
 
 export async function saveCloneSettings(patch: CloneSettings): Promise<Required<CloneSettings>> {
@@ -59,6 +69,94 @@ export async function saveCloneSettings(patch: CloneSettings): Promise<Required<
 
 export function isCustomVoice(voice: string): boolean {
   return voice.startsWith('custom-')
+}
+
+/**
+ * 克隆服务地址校验：仅 http/https；拒绝云元数据地址（169.254.169.254，SSRF 防护）。
+ * localhost/内网地址允许——自部署场景下用户在本机或局域网机器运行 TTS 服务是核心用法。
+ */
+export function validateCloneBaseUrl(raw: string): { ok: boolean; message?: string; url?: URL } {
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    return { ok: false, message: '克隆服务地址格式无效' }
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return { ok: false, message: '仅支持 http/https 协议' }
+  }
+  if (url.hostname === '169.254.169.254') {
+    return { ok: false, message: '不允许的地址' }
+  }
+  return { ok: true, url }
+}
+
+export interface CloneTestResult {
+  ok: boolean
+  message: string
+  latencyMs: number
+}
+
+/**
+ * 克隆服务连通性测试：用第一个参考音频合成一句短文本，
+ * 验证 服务可达 → 模型加载 → 推理 → 返回有效音频 的完整链路。
+ * patch 传入表单当前值（不落盘），可测试未保存的配置。
+ */
+export async function testCloneService(
+  patch: Partial<CloneSettings> = {}
+): Promise<CloneTestResult> {
+  const current = await readSettings()
+  const base: Required<CloneSettings> = {
+    baseUrl: patch.baseUrl?.trim() || current.baseUrl || process.env.TTS_CLONE_URL || '',
+    language: normalizeLanguage(
+      patch.language?.trim() || current.language || process.env.TTS_CLONE_LANGUAGE || 'zh-cn'
+    ),
+    speakersDir:
+      patch.speakersDir?.trim() ||
+      current.speakersDir ||
+      process.env.TTS_CLONE_SPEAKERS_DIR ||
+      '/app/speakers',
+    wavUrlPrefix: patch.wavUrlPrefix?.trim() || current.wavUrlPrefix || '',
+  }
+
+  if (!base.baseUrl) return { ok: false, message: '请先填写克隆服务地址', latencyMs: 0 }
+  const check = validateCloneBaseUrl(base.baseUrl)
+  if (!check.ok) return { ok: false, message: check.message || '克隆服务地址无效', latencyMs: 0 }
+
+  const voices = await listCustomVoices()
+  if (!voices.length)
+    return { ok: false, message: '还没有上传参考音频（自定义音色）', latencyMs: 0 }
+
+  const start = Date.now()
+  try {
+    const response = await fetcher.post(
+      `${base.baseUrl.replace(/\/$/, '')}/tts_to_audio/`,
+      {
+        text: '测试。',
+        speaker_wav: `${base.speakersDir.replace(/\/$/, '')}/${voices[0].file}`,
+        language: base.language,
+      },
+      { responseType: 'arraybuffer', timeout: 120_000 }
+    )
+    const status = response.status
+    const buf = Buffer.from(response.data)
+    if (status !== 200 || buf.length < 1000) {
+      return {
+        ok: false,
+        message: `服务响应异常（HTTP ${status}, ${buf.length} bytes）`,
+        latencyMs: Date.now() - start,
+      }
+    }
+    return {
+      ok: true,
+      message: `连接成功，XTTS 合成正常（${buf.length} bytes 音频）`,
+      latencyMs: Date.now() - start,
+    }
+  } catch (err) {
+    const ax = err as { response?: { status?: number; data?: { detail?: string } }; message?: string }
+    const detail = ax?.response?.data?.detail || ax?.message || '未知错误'
+    return { ok: false, message: String(detail), latencyMs: Date.now() - start }
+  }
 }
 
 function rateToSpeed(rate?: string): number {

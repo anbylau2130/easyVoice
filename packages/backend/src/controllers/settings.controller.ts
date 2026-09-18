@@ -2,7 +2,11 @@ import { Request, Response, NextFunction } from 'express'
 import { z } from 'zod'
 import { logger } from '../utils/logger'
 import { getLlmSettings, saveLlmSettings } from '../services/settings.service'
-import { getCloneSettings, saveCloneSettings } from '../services/clone-tts.service'
+import {
+  getCloneSettings,
+  saveCloneSettings,
+  testCloneService,
+} from '../services/clone-tts.service'
 
 const llmSettingsSchema = z.object({
   baseUrl: z
@@ -90,5 +94,15 @@ export async function saveCloneSettingsHandler(
   } catch (error) {
     logger.warn(`saveCloneSettings failed: ${(error as Error).message}`)
     res.status(400).json({ success: false, code: 400, message: (error as Error).message })
+  }
+}
+
+export async function testCloneHandler(_req: Request, res: Response, next: NextFunction) {
+  try {
+    const result = await testCloneService()
+    res.json({ success: true, code: 200, data: result })
+  } catch (error) {
+    logger.warn(`testCloneService failed: ${(error as Error).message}`)
+    res.status(500).json({ success: false, code: 500, message: (error as Error).message })
   }
 }

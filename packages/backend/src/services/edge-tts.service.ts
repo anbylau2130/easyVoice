@@ -50,7 +50,20 @@ export async function runEdgeTTS({
     }
     return synthesizeCloneVoice(text, voice, { rate, mode: 'stream' })
   }
-  const lang = voice.match(/([a-zA-Z]{2,5}-[a-zA-Z]{2,5}\b)/)?.[1]
+  // 自定义音色（声音克隆）：路由到本地克隆 TTS 服务
+  if (isCustomVoice(voice)) {
+    logger.info(`Custom voice synthesis: ${voice} (${text.length} chars, ${outputType})`)
+    if (outputType === 'file') {
+      // file 模式返回与 Edge 分支一致的 TTSResult 结构
+      await synthesizeCloneVoice(text, voice, { rate, mode: 'buffer', output })
+      return {
+        audio: output,
+        srt: output.replace('.mp3', '.srt'),
+        file: '',
+      }
+    }
+    return synthesizeCloneVoice(text, voice, { rate, mode: 'stream' })
+  }
   const useStyle = style && supportsStyle(voice) ? style : undefined
   const useStyleDegree = useStyle && styleDegree ? Number(styleDegree) : undefined
   const tts = new EdgeTTS({
