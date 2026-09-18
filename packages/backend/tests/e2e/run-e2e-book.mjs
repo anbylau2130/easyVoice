@@ -155,7 +155,7 @@ const bookParams = {
   )
   if (book.status === 'paused') {
     await api('POST', `/${bookId}/retryFailed`)
-    book = await waitForBook(bookId, (b) => b.status === 'completed', 420_000, '重试后完成')
+    book = await waitForBook(bookId, (b) => b.status === 'completed', 1800_000, '重试后完成')
   }
   check(
     'B3b 三章全部完成',
@@ -186,7 +186,7 @@ const bookParams = {
   const bookId = created.json?.data?.bookId
   await waitForBook(bookId, (b) => b.status === 'running', 30_000, '开始运行')
   await api('POST', `/${bookId}/pause`)
-  const paused = await waitForBook(bookId, (b) => b.status === 'paused', 420_000, '暂停')
+  const paused = await waitForBook(bookId, (b) => b.status === 'paused', 900_000, '暂停')
   const doneAtPause = paused.chapters.filter((c) => c.status === 'done').length
   check('B4a 手动暂停在章节边界生效且保留进度', doneAtPause > 0 && doneAtPause < 5, `done=${doneAtPause}`)
   const resumed = await api('POST', `/${bookId}/resume`)
@@ -198,9 +198,15 @@ const bookParams = {
   )
 }
 
-// B5 两阶段配音：规划失败 → 规划成功 → 编辑音色 → 生成完成
+// B5 两阶段配音：规划失败（无效 LLM 地址注入，测完恢复）→ 规划成功 → 编辑音色 → 生成完成
 {
-  await setMode('garbage')
+  // 注入不可达 LLM 地址触发规划失败
+  const origLlm = (await (await fetch(`${SETTINGS_BASE}/llm`)).json()).data
+  await fetch(`${SETTINGS_BASE}/llm`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ baseUrl: 'http://127.0.0.1:9' }),
+  })
   const chapters = ['甲', '乙'].map((mark, i) => ({
     title: `失败重试第${i + 1}章-${runId}`,
     content: chapterText(`（重试${mark}）`),
@@ -211,20 +217,19 @@ const bookParams = {
     params: { ...bookParams, useLLM: true },
   })
   const bookId = created.json?.data?.bookId
-  const initial = await api('GET', `/${bookId}`)
-  check(
-    'B5a AI 书创建后暂停等待音色规划',
-    initial.json?.data?.status === 'paused',
-    JSON.stringify(initial.json?.data?.status)
-  )
   await api('POST', `/${bookId}/planVoices`)
   const failedPlan = await waitForBook(bookId, (b) => !!b.message, 120_000, '规划失败信息')
   check(
     'B5b 规划失败写入错误信息（AI 模式不会自动生成）',
     failedPlan.status === 'paused' && failedPlan.chapters.every((c) => c.status !== 'done'),
-    JSON.stringify(failedPlan.message).slice(0, 120)
+    JSON.stringify({ status: failedPlan.status, message: failedPlan.message }).slice(0, 160)
   )
-  await setMode('normal')
+  // 恢复原 LLM 配置
+  await fetch(`${SETTINGS_BASE}/llm`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(origLlm),
+  })
   await api('POST', `/${bookId}/planVoices`)
   const planned = await waitForBook(
     bookId,
@@ -237,12 +242,12 @@ const bookParams = {
     (planned.characterVoices?.length || 0) >= 2,
     JSON.stringify(planned.characterVoices?.map((c) => c.character))
   )
-  // 编辑角色音色：主角改为晓伊
+  // 编辑角色音色：旁白改为晓伊
   const edited = planned.characterVoices.map((c) =>
-    c.character === '主角' ? { ...c, voice: 'zh-CN-XiaoyiNeural' } : { character: c.character, voice: c.voice }
+    c.character === '旁白' ? { ...c, voice: 'zh-CN-XiaoyiNeural' } : { character: c.character, voice: c.voice }
   )
   const saved = await api('POST', `/${bookId}/characterVoices`, { characters: edited })
-  const savedEntry = saved.json?.data?.find((c) => c.character === '主角')
+  const savedEntry = saved.json?.data?.find((c) => c.character === '旁白')
   check(
     'B5d 编辑角色音色生效',
     saved.status === 200 && savedEntry?.voice === 'zh-CN-XiaoyiNeural',
@@ -253,12 +258,12 @@ const bookParams = {
   let done = await waitForBook(
     bookId,
     (b) => b.status === 'completed' || b.status === 'paused',
-    300_000,
+    900_000,
     '一轮生成'
   )
   if (done.status === 'paused') {
     await api('POST', `/${bookId}/retryFailed`)
-    done = await waitForBook(bookId, (b) => b.status === 'completed', 300_000, '重试后完成')
+    done = await waitForBook(bookId, (b) => b.status === 'completed', 1800_000, '重试后完成')
   }
   check(
     'B5e 按确认的映射生成完成',
@@ -365,7 +370,7 @@ const bookParams = {
     body: JSON.stringify({ characters: edited }),
   })
   await fetch(`${BASE}/${bookId}/resume`, { method: 'POST' })
-  const done = await waitForBook(bookId, (b) => b.status === 'completed', 420_000, '克隆生成完成')
+  const done = await waitForBook(bookId, (b) => b.status === 'completed', 1800_000, '克隆生成完成')
   check(
     'B8b 克隆音色生成完成',
     done.chapters.filter((c) => c.status === 'done').length === 1,

@@ -19,7 +19,5 @@ packages/backend/e2e-tts-req.json
 .codegraph/
 .mimosa/
 **/.mimosa/
-# 仅忽略仓库根目录的用户电子书（不带斜杠的 book/ 会误伤源码目录 src/services/book）
-/book/
+packages/backend/_tmp.srt.json*
 xtts-api-server.tar
-voices/

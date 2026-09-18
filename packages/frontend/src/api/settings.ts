@@ -53,6 +53,22 @@ export interface CloneSettings {
   wavUrlPrefix: string
 }
 
+export interface CloneTestResult {
+  ok: boolean
+  message: string
+  latencyMs: number
+}
+
+export const testCloneSettings = async (
+  payload: Partial<CloneSettings>
+): Promise<CloneTestResult> => {
+  const response = await api.post<{ success: boolean; code: number; data: CloneTestResult }>(
+    '/clone/test',
+    payload ?? {}
+  )
+  return response.data.data
+}
+
 export const getCloneSettings = async (): Promise<CloneSettings> => {
   const response = await api.get<{ success: boolean; code: number; data: CloneSettings }>(
     '/clone'
