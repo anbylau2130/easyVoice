@@ -1,0 +1,17 @@
+**/node_modules
+**/dist
+**/public
+packages/backend/audio
+packages/backend/data
+packages/backend/e2e-clone-req.json
+packages/backend/e2e-clone-test.wav
+packages/backend/e2e-tts-req.json
+packages/backend/_tmp.srt.json*
+book
+voices
+docs
+.git
+.codegraph
+.mimosa
+.remember
+xtts-api-server.tar
