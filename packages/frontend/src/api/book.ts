@@ -171,6 +171,18 @@ export const deleteBook = async (id: string) => {
   return response.data?.message
 }
 
+/** 更新章节选择：indexes 中的章节（重新）纳入生成，其余未开始章节设为跳过 */
+export const updateChapterSelection = async (id: string, indexes: number[]) => {
+  const response = await api.post<{ success: boolean; code: number; data: BookDetail }>(
+    `/${id}/selection`,
+    { indexes }
+  )
+  if (response.data?.code !== 200) {
+    throw new Error(response.data?.message || '保存章节选择失败')
+  }
+  return response.data.data
+}
+
 export const chapterAudioUrl = (id: string, index: number) =>
   `${api.defaults.baseURL}/${id}/chapter/${index}/audio`
 export const chapterSrtUrl = (id: string, index: number) =>
@@ -193,7 +205,6 @@ export const saveCharacterVoices = async (
   const response = await api.post<{
     success: boolean
     code: number
-    message?: string
     data: CharacterVoice[]
   }>(`/${id}/characterVoices`, { characters })
   if (response.data?.code !== 200) {

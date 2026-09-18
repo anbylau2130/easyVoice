@@ -8,6 +8,7 @@ import {
   resumeBookHandler,
   retryFailedHandler,
   deleteBookHandler,
+  updateSelectionHandler,
   chapterAudioHandler,
   chapterSrtHandler,
   planVoicesHandler,
@@ -23,6 +24,7 @@ router.post('/create', createBookHandler)
 router.post('/:id/planVoices', planVoicesHandler)
 router.post('/:id/characterVoices', saveCharacterVoicesHandler)
 router.get('/:id/character/preview', previewCharacterHandler)
+router.post('/:id/selection', updateSelectionHandler)
 router.get('/:id', getBookHandler)
 router.post('/:id/pause', pauseBookHandler)
 router.post('/:id/resume', resumeBookHandler)

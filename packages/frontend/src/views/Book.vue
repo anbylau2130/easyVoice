@@ -79,7 +79,21 @@
           <el-button type="primary" :loading="savingClone" @click="handleSaveCloneSettings">
             保存克隆服务配置
           </el-button>
+          <el-button :loading="testingClone" @click="handleTestClone">测试连接</el-button>
         </div>
+        <el-alert
+          v-if="cloneTestResult"
+          :type="cloneTestResult.ok ? 'success' : 'error'"
+          :title="cloneTestResult.message"
+          :description="
+            cloneTestResult.latencyMs
+              ? `耗时 ${Math.round(cloneTestResult.latencyMs / 100) / 10} 秒`
+              : ''
+          "
+          :closable="false"
+          class="failed-alert"
+          show-icon
+        />
 
         <div class="upload-voice-row">
           <el-input
@@ -336,6 +350,13 @@
         <el-button v-if="bookDetail?.status === 'running'" type="warning" round @click="handlePause">
           暂停
         </el-button>
+        <el-button
+          v-if="bookDetail && bookDetail.status !== 'running'"
+          round
+          @click="openSelectionDialog"
+        >
+          选择章节
+        </el-button>
         <template v-if="bookDetail?.params.useLLM">
           <el-button
             v-if="!hasCharacterVoices"
@@ -373,6 +394,39 @@
         </el-button>
         <el-button round plain @click="backToUpload">新建有声书</el-button>
       </div>
+
+      <el-dialog v-model="selectionDialogVisible" title="选择章节" width="640px">
+        <p class="selection-tip">
+          勾选的章节会（重新）纳入生成队列，取消勾选的未开始章节将跳过；已完成章节不受影响。保存后回到本页继续操作。
+        </p>
+        <el-table
+          ref="selectionTableRef"
+          :data="bookDetail?.chapters || []"
+          max-height="420"
+          row-key="index"
+          @selection-change="handleProgressSelectionChange"
+        >
+          <el-table-column type="selection" width="46" :selectable="selectionSelectable" reserve-selection />
+          <el-table-column label="#" width="70">
+            <template #default="{ row }">{{ row.index + 1 }}</template>
+          </el-table-column>
+          <el-table-column prop="title" label="章节标题" min-width="200" show-overflow-tooltip />
+          <el-table-column label="状态" width="110">
+            <template #default="{ row }">
+              <el-tag :type="chapterStatusType(row.status)" size="small">
+                {{ chapterStatusText(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+        <template #footer>
+          <span v-if="selectionSaving" class="selection-tip">保存中…</span>
+          <el-button @click="selectionDialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="selectionSaving" @click="confirmSelection">
+            保存选择
+          </el-button>
+        </template>
+      </el-dialog>
 
       <section v-if="bookDetail?.characterVoices?.length" class="character-card">
         <div class="character-head">
@@ -509,7 +563,13 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadFile } from 'element-plus'
 import { getVoiceList, type Voice } from '@/api/tts'
-import { getLlmSettings, saveLlmSettings, getCloneSettings, saveCloneSettings } from '@/api/settings'
+import {
+  getLlmSettings,
+  saveLlmSettings,
+  getCloneSettings,
+  saveCloneSettings,
+  testCloneSettings,
+} from '@/api/settings'
 import {
   deleteCustomVoice,
   listCustomVoices,
@@ -523,6 +583,7 @@ import {
   characterPreviewUrl,
   createBook,
   deleteBook,
+  updateChapterSelection,
   getBook,
   listBooks,
   parseBook,
@@ -564,7 +625,7 @@ const volume = ref(0)
 const chapterTableRef = ref()
 const selectedChapters = ref<ParsedChapter[]>([])
 const chapterPage = ref(1)
-const chapterPageSize = 50
+const chapterPageSize = 100
 
 const bookId = ref<string | null>(null)
 const bookDetail = ref<BookDetail | null>(null)
@@ -595,6 +656,8 @@ const customVoices = ref<CustomVoice[]>([])
 const cloneOpen = ref(false)
 const cloneForm = ref({ baseUrl: '', language: 'zh', wavUrlPrefix: 'http://127.0.0.1:3000' })
 const savingClone = ref(false)
+const testingClone = ref(false)
+const cloneTestResult = ref<{ ok: boolean; message: string; latencyMs: number } | null>(null)
 const voiceUploading = ref(false)
 const uploadError = ref('')
 const newVoiceName = ref('')
@@ -856,6 +919,43 @@ async function handleDeleteBook(id: string, title: string) {
   }
 }
 
+// ===== 章节选择（进度页）=====
+const selectionDialogVisible = ref(false)
+const selectionSaving = ref(false)
+const selectionTableRef = ref()
+const selectionRows = ref<Record<string, unknown>[]>([])
+
+function selectionSelectable(row: { status: string }) {
+  return row.status !== 'done' && row.status !== 'processing'
+}
+
+function openSelectionDialog() {
+  selectionDialogVisible.value = true
+}
+
+function handleProgressSelectionChange(rows: Record<string, unknown>[]) {
+  selectionRows.value = rows
+}
+
+async function confirmSelection() {
+  if (!bookId.value || !bookDetail.value) return
+  const wanted = new Set(selectionRows.value.map((r) => r.index as number))
+  selectionSaving.value = true
+  try {
+    const indexes = bookDetail.value.chapters
+      .filter((c) => c.status !== 'done' && c.status !== 'processing' && wanted.has(c.index))
+      .map((c) => c.index)
+    await updateChapterSelection(bookId.value, indexes)
+    selectionDialogVisible.value = false
+    ElMessage.success('章节选择已更新')
+    await refreshDetail()
+  } catch (error) {
+    ElMessage.error((error as Error).message || '保存章节选择失败')
+  } finally {
+    selectionSaving.value = false
+  }
+}
+
 async function copyDir(dir: string) {
   try {
     await navigator.clipboard.writeText(dir)
@@ -881,6 +981,7 @@ async function handleSaveCloneSettings() {
   savingClone.value = true
   try {
     await saveCloneSettings({ ...cloneForm.value })
+    cloneTestResult.value = null
     ElMessage.success('克隆服务配置已保存')
   } catch (error) {
     ElMessage.error((error as Error).message || '保存失败')
@@ -889,17 +990,38 @@ async function handleSaveCloneSettings() {
   }
 }
 
+async function handleTestClone() {
+  testingClone.value = true
+  cloneTestResult.value = null
+  try {
+    const payload: Record<string, string> = {}
+    if (cloneForm.value.baseUrl.trim()) payload.baseUrl = cloneForm.value.baseUrl.trim()
+    if (cloneForm.value.language.trim()) payload.language = cloneForm.value.language.trim()
+    if (cloneForm.value.wavUrlPrefix.trim())
+      payload.wavUrlPrefix = cloneForm.value.wavUrlPrefix.trim()
+    const r = await testCloneSettings(payload)
+    cloneTestResult.value = r
+    if (r.ok) ElMessage.success('克隆服务连接成功')
+  } catch (error) {
+    ElMessage.error((error as Error).message || '测试失败')
+  } finally {
+    testingClone.value = false
+  }
+}
+
 async function handleUploadVoice(file: UploadFile) {
   const raw = file.raw
   if (!raw) return
-  const name = (raw.name || '').trim()
-  const ext = name.slice(name.lastIndexOf('.')) || '.wav'
-  if (!/\.(wav|mp3|m4a|flac|ogg)$/i.test(name)) {
+  const rawName = (raw.name || '').trim()
+  const ext = rawName.slice(rawName.lastIndexOf('.')) || '.wav'
+  if (!/\.(wav|mp3|m4a|flac|ogg)$/i.test(rawName)) {
     ElMessage.error('仅支持 wav/mp3/m4a/flac/ogg 音频！')
     return
   }
-  if (!newVoiceName.value.trim()) {
-    ElMessage.error('请先填写音色名称')
+  // 名称留空时默认使用文件名（去扩展名）
+  const voiceName = newVoiceName.value.trim() || rawName.replace(/\.[^.]+$/, '')
+  if (!voiceName) {
+    ElMessage.error('无法确定音色名称，请手动填写')
     return
   }
   voiceUploading.value = true
@@ -910,8 +1032,8 @@ async function handleUploadVoice(file: UploadFile) {
       reader.onerror = () => reject(new Error('文件读取失败'))
       reader.readAsDataURL(raw)
     })
-    await uploadCustomVoice(newVoiceName.value.trim(), dataUrl.slice(dataUrl.indexOf(',') + 1), ext)
-    ElMessage.success('自定义音色已上传')
+    await uploadCustomVoice(voiceName, dataUrl.slice(dataUrl.indexOf(',') + 1), ext)
+    ElMessage.success(`自定义音色「${voiceName}」已上传`)
     newVoiceName.value = ''
     await loadCustomVoices()
   } catch (error) {

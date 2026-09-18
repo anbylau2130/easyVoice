@@ -17,6 +17,7 @@ import {
   bookOutputDir,
   planBookVoices,
   saveCharacterVoices,
+  updateChapterSelection,
 } from '../services/book/book.service'
 import { generateSingleVoiceStream } from '../services/edge-tts.service'
 
@@ -153,6 +154,28 @@ export async function retryFailedHandler(req: Request, res: Response, next: Next
   try {
     await retryFailedChapters(req.params.id)
     res.json({ success: true, code: 200, message: '已开始重试失败章节' })
+  } catch (error) {
+    res.status(400).json({ success: false, code: 400, message: (error as Error).message })
+  }
+}
+
+const selectionSchema = z.object({
+  indexes: z.array(z.number().int().min(0)).max(5000),
+})
+
+export async function updateSelectionHandler(req: Request, res: Response) {
+  try {
+    const parsed = selectionSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        code: 400,
+        message: parsed.error.issues[0]?.message || '参数格式错误',
+      })
+      return
+    }
+    const book = await updateChapterSelection(req.params.id, parsed.data.indexes)
+    res.json({ success: true, code: 200, data: book })
   } catch (error) {
     res.status(400).json({ success: false, code: 400, message: (error as Error).message })
   }
