@@ -10,3 +10,15 @@ run.test.sh
 run.prod.sh
 **test**.sh
 scripts/docker-compose.yml
+packages/backend/data/
+packages/backend/audio/custom-voices/
+packages/backend/e2e-clone-req.json
+packages/backend/e2e-clone-test.wav
+packages/backend/e2e-tts-req.json
+.remember/
+.codegraph/
+.mimosa/
+**/.mimosa/
+book/
+xtts-api-server.tar
+voices/

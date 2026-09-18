@@ -558,6 +558,9 @@ const updateAudioList = (data: GenerateResponse) => {
   const newAudioList = [...generationStore.audioList, audioItem]
   generationStore.updateAudioList(newAudioList)
   ElMessage.success('语音生成成功！')
+  if (data.partial) {
+    ElMessage.warning('部分片段生成失败，生成的音频可能不完整！')
+  }
   playSuccessSound()
   generating.value = false
 
@@ -650,7 +653,10 @@ const generateAudioTask = async () => {
       )
     }
     const onError = (msg: string) => {
-      console.error(msg)
+      console.error('流式生成中断:', msg)
+      generating.value = false
+      generationStore.updateProgress(0)
+      ElMessage.error('语音生成中断，请重试；若反复失败请检查模型配置或改用 Edge TTS 模式')
     }
     processor.value = createAudioStreamProcessor(
       stream as unknown as ReadableStream,

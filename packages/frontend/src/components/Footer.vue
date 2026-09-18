@@ -4,6 +4,7 @@
     <div class="footer-links">
       <router-link class="footer-icon" to="/"><Home /> 首页</router-link>
       <router-link class="footer-icon" to="/generate"><Mic /> 生成语音</router-link>
+      <router-link class="footer-icon" to="/book"><BookOpen /> 有声书</router-link>
       <router-link class="footer-icon" to="/about"><Info /> 关于</router-link>
       <el-link
         class="footer-icon"

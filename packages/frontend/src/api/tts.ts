@@ -41,6 +41,7 @@ export interface GenerateResponse {
   srt?: string
   size?: number
   id: string
+  partial?: boolean
 }
 export type Voice = {
   Name: string

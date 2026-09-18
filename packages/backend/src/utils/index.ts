@@ -8,7 +8,15 @@ import { AUDIO_DIR } from '../config'
 
 export async function getLangConfig(text: string) {
   const { franc } = await import('franc')
-  let lang = franc(text)
+  // franc 对重复性/口语化中文长文本可能误判（如 spa/jpn），
+  // 中文字符占比高时直接判定为 zh；含日文假名则交还 franc（日语汉字占比也高，但应用 zh 声音朗读是错的）
+  const compactText = text.replace(/\s/g, '')
+  const cjkCount = (compactText.match(/[\u4e00-\u9fff]/g) || []).length
+  const hasKana = /[\u3040-\u30ff]/.test(compactText)
+  let lang =
+    compactText.length > 0 && cjkCount / compactText.length > 0.15 && !hasKana
+      ? 'zh'
+      : franc(text)
   if (lang === 'cmn') {
     lang = 'zh'
   }
@@ -129,16 +137,16 @@ export function streamToResponse(
   })
 
   const handleDisconnect = () => {
-    if (!isClientDisconnected) {
-      isClientDisconnected = true
-      logger.info('Client disconnected')
-      // 清理流
-      if ('destroy' in inputStream) {
-        ;(inputStream as Readable).destroy()
-      }
-      outputStream.destroy()
-      if (onClose) onClose()
+    // 响应正常结束后的 close 不是客户端断开，此时销毁流会把收尾中的写入打挂
+    if (res.writableEnded || isClientDisconnected) return
+    isClientDisconnected = true
+    logger.info('Client disconnected')
+    // 清理流
+    if ('destroy' in inputStream) {
+      ;(inputStream as Readable).destroy()
     }
+    outputStream.destroy()
+    if (onClose) onClose()
   }
 
   res.on('close', handleDisconnect)
@@ -146,20 +154,19 @@ export function streamToResponse(
     logger.info('Response finished')
   })
 
-  // 输入流错误处理
+  // 输入流错误处理：断开连接让客户端 read() reject 走错误路径，
+  // 不能把错误文本写进音频流后正常收尾——前端会把截断的音频当成功
   inputStream.on('error', (err: Error) => {
     if (isClientDisconnected) return
-    logger.error('Input stream error:', err)
-    const errorMessage = onError(err)
-    outputStream.write(errorMessage)
-    outputStream.end()
+    logger.error('Input stream error:', onError(err))
+    res.destroy(err)
   })
 
   // 输出流错误处理
   outputStream.on('error', (err: Error) => {
     if (isClientDisconnected) return
     logger.error('Output stream error:', err)
-    res.status(500).end('Internal server error')
+    res.destroy(err)
   })
 
   // 流完成处理
@@ -174,7 +181,7 @@ export function streamToResponse(
   inputStream.on('uncaughtException' as any, (err: Error) => {
     logger.error('Uncaught exception in input stream:', err)
     if (!isClientDisconnected) {
-      res.status(500).end('Internal server error')
+      res.destroy(err)
     }
   })
 

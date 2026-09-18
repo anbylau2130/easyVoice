@@ -1,0 +1,94 @@
+import { Request, Response, NextFunction } from 'express'
+import { z } from 'zod'
+import { logger } from '../utils/logger'
+import { getLlmSettings, saveLlmSettings } from '../services/settings.service'
+import { getCloneSettings, saveCloneSettings } from '../services/clone-tts.service'
+
+const llmSettingsSchema = z.object({
+  baseUrl: z
+    .string()
+    .trim()
+    .refine((v) => v === '' || /^https?:\/\//i.test(v), {
+      message: 'Base URL 仅支持 http/https 地址',
+    })
+    .optional(),
+  apiKey: z.string().trim().optional(),
+  model: z.string().trim().optional(),
+})
+
+export async function getLlmSettingsHandler(_req: Request, res: Response, next: NextFunction) {
+  try {
+    const data = await getLlmSettings()
+    res.json({ success: true, code: 200, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function saveLlmSettingsHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = llmSettingsSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        code: 400,
+        message: parsed.error.issues[0]?.message || '参数格式错误',
+      })
+      return
+    }
+    await saveLlmSettings(parsed.data)
+    const data = await getLlmSettings()
+    res.json({ success: true, code: 200, message: '配置已保存并立即生效', data })
+  } catch (error) {
+    logger.warn(`saveLlmSettings failed: ${(error as Error).message}`)
+    res.status(400).json({ success: false, code: 400, message: (error as Error).message })
+  }
+}
+
+const cloneSettingsSchema = z.object({
+  baseUrl: z.string().trim().optional(),
+  language: z.string().trim().optional(),
+  wavUrlPrefix: z
+    .string()
+    .trim()
+    .refine((v) => v === '' || /^https?:\/\//i.test(v), {
+      message: '参考音频地址前缀仅支持 http/https',
+    })
+    .optional(),
+})
+
+export async function getCloneSettingsHandler(
+  _req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const data = await getCloneSettings()
+    res.json({ success: true, code: 200, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function saveCloneSettingsHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const parsed = cloneSettingsSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        code: 400,
+        message: parsed.error.issues[0]?.message || '参数格式错误',
+      })
+      return
+    }
+    const data = await saveCloneSettings(parsed.data)
+    res.json({ success: true, code: 200, message: '克隆服务配置已保存', data })
+  } catch (error) {
+    logger.warn(`saveCloneSettings failed: ${(error as Error).message}`)
+    res.status(400).json({ success: false, code: 400, message: (error as Error).message })
+  }
+}

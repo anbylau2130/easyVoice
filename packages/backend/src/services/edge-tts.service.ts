@@ -2,6 +2,24 @@ import fs from 'fs/promises'
 import { EdgeSchema } from '../schema/generate'
 import { EdgeTTS } from '../lib/node-edge-tts/edge-tts-fixed'
 import { fileExist, readJson, safeRunWithRetry } from '../utils'
+import { logger } from '../utils/logger'
+import { isCustomVoice, synthesizeCloneVoice } from './clone-tts.service'
+
+// 微软官方支持情感风格（mstts:express-as）的声音（按名称片段匹配）。
+// 不支持的声音传入 style 会被忽略，保持原语气合成。
+const STYLE_SUPPORTED_VOICE_PATTERNS = [
+  'XiaoxiaoNeural',
+  'XiaoyiNeural',
+  'YunjianNeural',
+  'YunxiNeural',
+  'YunyangNeural',
+  'YunyeNeural',
+  'YunzeNeural',
+]
+
+function supportsStyle(voice: string): boolean {
+  return STYLE_SUPPORTED_VOICE_PATTERNS.some((pattern) => voice.includes(pattern))
+}
 
 export async function runEdgeTTS({
   text,
@@ -11,8 +29,30 @@ export async function runEdgeTTS({
   rate,
   output,
   outputType = 'file',
-}: Omit<EdgeSchema, 'useLLM'> & { output: string; outputType?: string }) {
-  const lang = /([a-zA-Z]{2,5}-[a-zA-Z]{2,5}\b)/.exec(voice)?.[1]
+  style,
+  styleDegree,
+}: Omit<EdgeSchema, 'useLLM'> & {
+  output: string
+  outputType?: string
+  style?: string
+  styleDegree?: string
+}) {
+  // 自定义音色（声音克隆）：路由到本地克隆 TTS 服务
+  if (isCustomVoice(voice)) {
+    logger.info(`Custom voice synthesis: ${voice} (${text.length} chars, ${outputType})`)
+    if (outputType === 'file') {
+      await synthesizeCloneVoice(text, voice, { rate, mode: 'buffer', output })
+      return {
+        audio: output,
+        srt: output.replace('.mp3', '.srt'),
+        file: '',
+      }
+    }
+    return synthesizeCloneVoice(text, voice, { rate, mode: 'stream' })
+  }
+  const lang = voice.match(/([a-zA-Z]{2,5}-[a-zA-Z]{2,5}\b)/)?.[1]
+  const useStyle = style && supportsStyle(voice) ? style : undefined
+  const useStyleDegree = useStyle && styleDegree ? Number(styleDegree) : undefined
   const tts = new EdgeTTS({
     voice,
     lang,
@@ -22,6 +62,8 @@ export async function runEdgeTTS({
     rate,
     volume,
     timeout: 30_000,
+    style: useStyle,
+    styleDegree: useStyleDegree && Number.isFinite(useStyleDegree) ? useStyleDegree : undefined,
   })
   console.log(`run with nodejs edge-tts service...`)
   if (outputType === 'file') {

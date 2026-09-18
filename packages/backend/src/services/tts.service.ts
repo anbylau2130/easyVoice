@@ -1,16 +1,15 @@
 import path from 'path'
 import fs from 'fs/promises'
-import ffmpeg from 'fluent-ffmpeg'
+import ffmpeg from '../utils/ffmpeg'
 import { AUDIO_DIR, STATIC_DOMAIN, EDGE_API_LIMIT } from '../config'
 import { logger } from '../utils/logger'
-import { getPrompt } from '../llm/prompt/generateSegment'
+import { fetchLlmSegments, NormalizedSegment, CharacterVoice } from '../llm/segmentParser'
 import { ensureDir, generateId, getLangConfig, readJson } from '../utils'
-import { openai } from '../utils/openai'
 import { splitText } from './text.service'
 import { generateSingleVoice, generateSrt } from './edge-tts.service'
 import { EdgeSchema } from '../schema/generate'
 import { MapLimitController } from '../controllers/concurrency.controller'
-import audioCacheInstance from './audioCache.service'
+import audioCacheInstance, { isCacheEntryUsable } from './audioCache.service'
 import { mergeSubtitleFiles, SubtitleFile, SubtitleFiles } from '../utils/subtitle'
 import taskManager, { Task } from '../utils/taskManager'
 import { handleSrt } from './tts.stream.service'
@@ -29,12 +28,19 @@ export enum ErrorMessages {
 /**
  * 生成文本转语音 (TTS) 的音频和字幕
  */
-export async function generateTTS(params: Required<EdgeSchema>, task?: Task): Promise<TTSResult> {
+export type TtsProgressCallback = (done: number, total: number) => void
+
+export async function generateTTS(
+  params: Required<EdgeSchema>,
+  task?: Task,
+  onProgress?: TtsProgressCallback,
+  characterVoices?: CharacterVoice[]
+): Promise<TTSResult> {
   const { text, pitch, voice, rate, volume, useLLM } = params
   // 检查缓存
   const cacheKey = taskManager.generateTaskId({ text, pitch, voice, rate, volume })
   const cache = await audioCacheInstance.getAudio(cacheKey)
-  if (cache) {
+  if (cache && (await isCacheEntryUsable(cache))) {
     logger.info(`Cache hit: ${voice} ${text.slice(0, 10)}`)
     return cache
   }
@@ -46,20 +52,9 @@ export async function generateTTS(params: Required<EdgeSchema>, task?: Task): Pr
 
   let result: TTSResult
   if (useLLM) {
-    result = await generateWithLLM(segment, voiceList, lang, task)
+    result = await generateWithLLM(segment, voiceList, lang, task, onProgress, characterVoices)
   } else {
-    result = await generateWithoutLLM(
-      segment,
-      {
-        text,
-        pitch,
-        voice,
-        rate,
-        volume,
-        output: segment.id,
-      },
-      task
-    )
+    result = await generateWithoutLLM(segment, { text, pitch, voice, rate, volume, output: segment.id }, task, onProgress)
   }
 
   // 验证结果并缓存
@@ -80,55 +75,40 @@ async function generateWithLLM(
   segment: Segment,
   voiceList: VoiceConfig[],
   lang: string,
-  task?: Task
+  task?: Task,
+  onProgress?: TtsProgressCallback,
+  characterVoices?: CharacterVoice[]
 ): Promise<TTSResult> {
   const { text, id } = segment
-  const { length, segments } = splitText(text.trim())
-  const formatLlmSegments = (llmSegments: any) =>
-    llmSegments
-      .filter((segment: any) => segment.text)
-      .map((segment: any) => ({
-        ...segment,
-        voice: segment.name,
-      }))
+  const { length, segments: textSegments } = splitText(text.trim())
   if (length <= 1) {
-    const prompt = getPrompt(lang, voiceList, segments[0])
-    // logger.debug(`Prompt for LLM: ${prompt}`)
-    const llmResponse = await fetchLLMSegment(prompt)
-    let llmSegments = llmResponse?.result || llmResponse?.segments || []
-    if (!Array.isArray(llmSegments)) {
-      task?.endTask?.(task.id)
-      throw new Error(
-        'LLM response is not an array, please switch to Edge TTS mode or use another model'
-      )
-    }
-    const result = await buildSegmentList(segment, formatLlmSegments(llmSegments), task)
+    const llmSegments = await fetchLlmSegments({
+      lang,
+      voiceList,
+      text: textSegments[0],
+      characterVoices,
+    })
+    const result = await buildSegmentList(segment, llmSegments, task, onProgress)
     task?.updateProgress?.(task.id, 100)
     return result
   } else {
-    logger.info('Splitting text into multiple segments:', segments.length)
+    logger.info('Splitting text into multiple segments:', textSegments.length)
     let finalSegments = []
     let count = 0
     const getProgress = () => {
-      return Number(((count / segments.length) * 100).toFixed(2))
+      return Number(((count / textSegments.length) * 100).toFixed(2))
     }
-    for (let seg of segments) {
+    for (let seg of textSegments) {
       count++
-      const prompt = getPrompt(lang, voiceList, seg)
-      // logger.debug(`Prompt for LLM: ${prompt}`)
-      const llmResponse = await fetchLLMSegment(prompt)
-      let llmSegments = llmResponse?.result || llmResponse?.segments || []
-      if (!Array.isArray(llmSegments)) {
-        throw new Error(
-          'LLM response is not an array, please switch to Edge TTS mode or use another model'
-        )
-      }
+      const llmSegments = await fetchLlmSegments({ lang, voiceList, text: seg, characterVoices })
       const result = await buildSegmentList(
-        { ...segment, id: `[segments:${count}]${segment.id}` },
-        formatLlmSegments(llmSegments)
+        // 前缀不能含冒号：该 id 会用作 Windows 临时目录名（冒号为保留字符）
+        { ...segment, id: `segments-${count}-${segment.id}` },
+        llmSegments
       )
       task?.updateProgress?.(task.id, getProgress())
       finalSegments.push(result)
+      onProgress?.(count, textSegments.length)
     }
     return await buildFinal(finalSegments, id)
   }
@@ -153,6 +133,17 @@ const buildFinal = async (finalSegments: TTSResult[], id: string) => {
   )
   const outputFile = path.resolve(AUDIO_DIR, id)
   await concatDirAudio({ inputDir: finalDir, fileList, outputFile })
+  // 拼接完成后，各分段的中间产物（mp3/srt/字幕json/临时目录）已无用，统一清理保持根目录整洁
+  await Promise.all(
+    finalSegments.map(async (segment) => {
+      const base = decodeURIComponent(segment.audio.split('/').pop() || '')
+      const stem = base.replace(/\.mp3$/, '')
+      await fs.rm(path.resolve(AUDIO_DIR, base), { force: true })
+      await fs.rm(path.resolve(AUDIO_DIR, `${base}.json`), { force: true })
+      await fs.rm(path.resolve(AUDIO_DIR, `${stem}.srt`), { force: true })
+      await fs.rm(path.resolve(AUDIO_DIR, stem), { recursive: true, force: true })
+    })
+  )
   return {
     audio: `${STATIC_DOMAIN}/${id}`,
     srt: `${STATIC_DOMAIN}/${id.replace('.mp3', '.srt')}`,
@@ -164,16 +155,19 @@ const buildFinal = async (finalSegments: TTSResult[], id: string) => {
 async function generateWithoutLLM(
   segment: Segment,
   params: TTSParams,
-  task?: Task
+  task?: Task,
+  onProgress?: TtsProgressCallback
 ): Promise<TTSResult> {
   const { text, pitch, voice, rate, volume } = params
   const { length, segments } = splitText(text)
 
   if (length <= 1) {
-    return buildSegment(segment, params)
+    const result = await buildSegment(segment, params)
+    onProgress?.(1, 1)
+    return result
   } else {
     const buildSegments = segments.map((segment) => ({ ...params, text: segment }))
-    let result = await buildSegmentList(segment, buildSegments, task)
+    const result = await buildSegmentList(segment, buildSegments, task, onProgress)
     task?.updateProgress?.(task.id, 100)
     return result
   }
@@ -213,8 +207,9 @@ async function buildSegment(
  */
 async function buildSegmentList(
   segment: Segment,
-  segments: BuildSegment[],
-  task?: Task
+  segments: NormalizedSegment[],
+  task?: Task,
+  onProgress?: TtsProgressCallback
 ): Promise<TTSResult> {
   const fileList: string[] = []
   const length = segments.length
@@ -239,9 +234,11 @@ async function buildSegmentList(
     const output = path.resolve(tmpDirPath, `${index + 1}_splits.mp3`)
     const cacheKey = taskManager.generateTaskId({ text, pitch, voice, rate, volume })
     const cache = await audioCacheInstance.getAudio(cacheKey)
-    if (cache) {
+    if (cache && (await isCacheEntryUsable(cache))) {
       logger.info(`Cache hit[segments]: ${voice} ${text.slice(0, 10)}`)
       fileList.push(cache.audio)
+      handledLength++
+      onProgress?.(handledLength, length)
       return cache
     }
     const result = await generateSingleVoice({ text, pitch, voice, rate, volume, output })
@@ -249,6 +246,7 @@ async function buildSegmentList(
     fileList.push(result.audio)
     handledLength++
     task?.updateProgress?.(task.id, getProgress())
+    onProgress?.(handledLength, length)
     const params = { text, pitch, voice, rate, volume }
     await audioCacheInstance.setAudio(cacheKey, { ...params, ...result })
     return result
@@ -295,40 +293,6 @@ function validateLangAndVoice(lang: string, voice: string): void {
   if (lang !== 'eng' && voice.startsWith('en')) {
     throw new Error(ErrorMessages.ENG_MODEL_INVALID_TEXT)
   }
-}
-
-/**
- * 从 LLM 获取分段参数
- */
-async function fetchLLMSegment(prompt: string): Promise<any> {
-  const response = await openai.createChatCompletion({
-    messages: [
-      {
-        role: 'system',
-        content: 'You are a helpful assistant. And you can return valid json object',
-      },
-      { role: 'user', content: prompt },
-    ],
-    // temperature: 0.7,
-    // max_tokens: 500,
-    response_format: { type: 'json_object' },
-  })
-
-  if (!response.choices[0].message.content) {
-    throw new Error(ErrorMessages.INVALID_API_RESPONSE)
-  }
-  return parseLLMResponse(response)
-}
-
-/**
- * 解析 LLM 响应
- */
-function parseLLMResponse(response: any): TTSParams {
-  const params = JSON.parse(response.choices[0].message.content) as TTSParams
-  if (!params || typeof params !== 'object') {
-    throw new Error(ErrorMessages.INVALID_PARAMS_FORMAT)
-  }
-  return params
 }
 
 /**
@@ -381,9 +345,14 @@ export async function concatDirSrt({
   )
   if (!jsonFiles.length) throw new Error('No JSON files found for subtitles')
 
-  const subtitleFiles: SubtitleFiles = await Promise.all(
-    jsonFiles.map((file) => readJson<SubtitleFile>(file))
-  )
+  const subtitleFiles = (
+    await Promise.all(jsonFiles.map((file) => readJson<SubtitleFile>(file)))
+  ).filter((subtitle): subtitle is SubtitleFile => Array.isArray(subtitle))
+  // 克隆等非 Edge 音源没有字幕数据：跳过字幕合并，不视为失败
+  if (!subtitleFiles.length) {
+    logger.warn('No subtitle data found, skip srt merge')
+    return
+  }
   const mergedJson = mergeSubtitleFiles(subtitleFiles)
   const tempJsonPath = path.resolve(inputDir, 'all_splits.mp3.json')
   await fs.writeFile(tempJsonPath, JSON.stringify(mergedJson, null, 2))

@@ -3,7 +3,7 @@ import { Request, Response, NextFunction } from 'express'
 import { logger } from '../utils/logger'
 import taskManager from '../utils/taskManager'
 import { EdgeSchema } from '../schema/generate'
-import { generateTTSStream, generateTTSStreamJson } from '../services/tts.stream.service'
+import { generateTTSStream, generateTTSStreamJson, failStreamTask } from '../services/tts.stream.service'
 import { generateId, streamWithLimit } from '../utils'
 function formatBody({ text, pitch, voice, volume, rate, useLLM }: EdgeSchema) {
   const positivePercent = (value: string | undefined) => {
@@ -42,7 +42,7 @@ export async function createTaskStream(req: Request, res: Response, next: NextFu
     const task = taskManager.createTask(formattedBody)
     task.context = { req, res, body: req.body }
     logger.info(`Generated stream task ID: ${task.id}`)
-    generateTTSStream(formattedBody, task)
+    generateTTSStream(formattedBody, task).catch((err) => failStreamTask(task, err as Error))
   } catch (error) {
     console.log(`createTaskStream error:`, error)
     next(error)
@@ -64,7 +64,7 @@ export async function generateJson(req: Request, res: Response, next: NextFuncti
     const segment: Segment = { id: generateId(voice, text), text }
     task.context = { req, res, segment, body: req.body }
     logger.info(`Generated stream task ID: ${task.id}`)
-    generateTTSStreamJson(formatedBody, task)
+    generateTTSStreamJson(formatedBody, task).catch((err) => failStreamTask(task, err as Error))
   } catch (error) {
     console.log(`createTaskStream error:`, error)
     next(error)

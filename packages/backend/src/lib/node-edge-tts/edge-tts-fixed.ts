@@ -32,6 +32,8 @@ type configure = {
   pitch?: string
   volume?: string
   timeout?: number
+  style?: string // 情感风格（mstts:express-as），如 cheerful/sad/whispering；仅部分声音支持
+  styleDegree?: number // 情感强度 0.5~2
 }
 
 class EdgeTTS {
@@ -46,6 +48,8 @@ class EdgeTTS {
   private pitch: string
   private volume: string
   private timeout: number
+  private style: string
+  private styleDegree?: number
 
   constructor({
     voice = 'zh-CN-XiaoyiNeural',
@@ -59,6 +63,8 @@ class EdgeTTS {
     pitch = 'default',
     volume = 'default',
     timeout = 10000,
+    style = '',
+    styleDegree,
   }: configure = {}) {
     this.voice = voice
     this.lang = lang
@@ -71,6 +77,8 @@ class EdgeTTS {
     this.pitch = pitch
     this.volume = volume
     this.timeout = timeout
+    this.style = style
+    this.styleDegree = styleDegree
   }
 
   async _connectWebSocket(): Promise<WebSocket> {
@@ -331,12 +339,23 @@ class EdgeTTS {
     // 发送 SSML 请求
     try {
       const requestId = randomBytes(16).toString('hex')
+      // 情感风格：仅部分微软声音支持 express-as，不支持的声音由调用方过滤；
+      // 此处只要 style 非空就注入，普通文本不加包装保持兼容
+      const styleXml =
+        this.style
+          ? `<mstts:express-as style="${escapeSSML(this.style)}"${
+              this.styleDegree ? ` styledegree="${this.styleDegree}"` : ''
+            }>`
+          : ''
+      const styleClose = this.style ? '</mstts:express-as>' : ''
       _wsConnect.send(
         `X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nPath:ssml\r\n\r\n
         <speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="${this.lang}">
           <voice name="${this.voice}">
             <prosody rate="${this.rate}" pitch="${this.pitch}" volume="${this.volume}">
+              ${styleXml}
               ${escapeSSML(text)}
+              ${styleClose}
             </prosody>
           </voice>
         </speak>`

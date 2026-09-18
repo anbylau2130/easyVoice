@@ -20,7 +20,8 @@ export function createOpenAIClient() {
   let currentConfig: OpenAIConfig = {
     baseURL: OPENAI_BASE_URL,
     model: MODEL_NAME,
-    timeout: 60000,
+    // 推理型模型（如 glm-5.3）处理大 prompt 时耗时明显更长，60s 会频繁超时
+    timeout: 300000,
     apiKey: OPENAI_API_KEY,
   }
   logger.debug(`init openai with: `, {
@@ -29,7 +30,7 @@ export function createOpenAIClient() {
   })
   // 设置 headers
   const getHeaders = () => ({
-    Authorization: `Bearer ${currentConfig.apiKey}`,
+    Authorization: `Bearer ${currentConfig.apiKey || OPENAI_API_KEY}`,
     'Content-Type': 'application/json',
   })
 
@@ -47,11 +48,14 @@ export function createOpenAIClient() {
         ...currentConfig,
         ...customConfig,
       }
+      // 兜底：全局配置可能被意外置空（undefined），回落到环境变量初始值
+      const baseURL = mergedConfig.baseURL || OPENAI_BASE_URL
+      const model = mergedConfig.model || MODEL_NAME
 
       const response = await fetcher.post<ChatCompletionResponse>(
-        `${mergedConfig.baseURL}${mergedConfig.baseURL?.endsWith('/') ? '' : '/'}chat/completions`,
+        `${baseURL}${baseURL?.endsWith('/') ? '' : '/'}chat/completions`,
         {
-          model: request.model || mergedConfig.model,
+          model: request.model || model,
           temperature: request.temperature ?? 1.0,
           max_tokens: request.max_tokens,
           top_p: request.top_p ?? 1.0,

@@ -50,14 +50,16 @@ export type LlmSchema = z.infer<typeof llmSchema>
 
 export type EdgeSchema = z.infer<typeof edgeSchema>
 
-const commonValidate = (req: Request, res: Response, next: NextFunction, schema: z.ZodTypeAny) => {
+const commonValidate = (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  schema: z.ZodTypeAny,
+  onValid?: (req: Request) => void
+) => {
   try {
     schema.parse(req.body)
-    openai.config({
-      apiKey: req.body.openaiKey,
-      baseURL: req.body.openaiBaseUrl,
-      model: req.body.openaiModel,
-    })
+    onValid?.(req)
     if (LIMIT_TEXT_LENGTH) {
       const allTxt = req.body.text
       if (allTxt?.length > LIMIT_TEXT_LENGTH) {
@@ -107,6 +109,12 @@ export const validateLLM = (req: Request, res: Response, next: NextFunction) => 
     })
     return
   }
+  // 记录请求原始携带的字段：只有这些才允许更新全局配置，
+  // env 回填值只用于通过 schema 校验，避免 .env 覆盖设置页保存的配置
+  const original: { baseURL?: string; apiKey?: string; model?: string } = {}
+  if (req.body?.openaiBaseUrl !== undefined) original.baseURL = req.body.openaiBaseUrl
+  if (req.body?.openaiKey !== undefined) original.apiKey = req.body.openaiKey
+  if (req.body?.openaiModel !== undefined) original.model = req.body.openaiModel
   // read from env if not provided in request body
   const { OPENAI_BASE_URL, OPENAI_API_KEY, MODEL_NAME } = process.env
   if (!req.body?.openaiBaseUrl && OPENAI_BASE_URL) {
@@ -118,7 +126,11 @@ export const validateLLM = (req: Request, res: Response, next: NextFunction) => 
   if (!req.body?.openaiModel && MODEL_NAME) {
     req.body.openaiModel = MODEL_NAME
   }
-  commonValidate(req, res, next, llmSchema)
+  commonValidate(req, res, next, llmSchema, () => {
+    if (original.baseURL !== undefined || original.apiKey !== undefined || original.model !== undefined) {
+      openai.config(original)
+    }
+  })
 }
 export const validateJson = (req: Request, res: Response, next: NextFunction) => {
   try {

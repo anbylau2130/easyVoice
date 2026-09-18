@@ -1,5 +1,7 @@
+import fs from 'fs/promises'
+import path from 'path'
 import { logger } from '../utils/logger'
-import { AUDIO_CACHE_DIR } from '../config'
+import { AUDIO_CACHE_DIR, AUDIO_DIR } from '../config'
 import CacheService, { CacheOptions } from './cache.service'
 
 interface AudioData {
@@ -48,3 +50,20 @@ const instance = new AudioCacheService({
 })
 
 export default instance
+
+/**
+ * 校验缓存记录指向的音频文件是否仍然存在。
+ * 缓存条目 TTL 很长，但 audio/ 下的文件可能被移动或清理；
+ * 失效的缓存必须当作未命中，否则同文本会永远拿到打不开的音频。
+ */
+export async function isCacheEntryUsable(entry: { audio?: string } | null): Promise<boolean> {
+  const base = decodeURIComponent(String(entry?.audio || '').split('/').pop() || '')
+  if (!base) return false
+  try {
+    await fs.access(path.resolve(AUDIO_DIR, base))
+    return true
+  } catch {
+    logger.warn(`Stale audio cache detected (file missing): ${base}`)
+    return false
+  }
+}

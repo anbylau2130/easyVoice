@@ -1,24 +1,24 @@
 import path, { resolve } from 'path'
 import { Response } from 'express'
 import fs, { readdir } from 'fs/promises'
-import ffmpeg from 'fluent-ffmpeg'
+import ffmpeg from '../utils/ffmpeg'
 import { AUDIO_DIR, STATIC_DOMAIN, EDGE_API_LIMIT } from '../config'
 import { logger } from '../utils/logger'
-import { getPrompt } from '../llm/prompt/generateSegment'
+import { fetchLlmSegments, NormalizedSegment } from '../llm/segmentParser'
 import {
   asyncSleep,
   ensureDir,
   generateId,
   getLangConfig,
   readJson,
+  safeRunWithRetry,
   streamToResponse,
 } from '../utils'
-import { openai } from '../utils/openai'
 import { splitText } from './text.service'
 import { generateSingleVoiceStream, generateSrt } from './edge-tts.service'
 import { EdgeSchema } from '../schema/generate'
 import { MapLimitController } from '../controllers/concurrency.controller'
-import audioCacheInstance from './audioCache.service'
+import audioCacheInstance, { isCacheEntryUsable } from './audioCache.service'
 import { mergeSubtitleFiles, SubtitleFile, SubtitleFiles } from '../utils/subtitle'
 import taskManager, { Task } from '../utils/taskManager'
 import { Readable, PassThrough } from 'stream'
@@ -52,10 +52,10 @@ export async function generateTTSStream(params: Required<EdgeSchema>, task: Task
     return
   }
 
-  // 检查缓存, 如果有缓存则直接返回
+  // 检查缓存, 如果有缓存则直接返回（且缓存文件真实存在）
   const cacheKey = taskManager.generateTaskId({ text, pitch, voice, rate, volume })
   const cache = await audioCacheInstance.getAudio(cacheKey)
-  if (cache) {
+  if (cache && (await isCacheEntryUsable(cache))) {
     const data = {
       ...cache,
       file: path.parse(cache.audio).base,
@@ -71,9 +71,11 @@ export async function generateTTSStream(params: Required<EdgeSchema>, task: Task
   }
 
   if (useLLM) {
-    generateWithLLMStream(task)
+    generateWithLLMStream(task).catch((err) => failStreamTask(task, err as Error))
   } else {
-    generateWithoutLLMStream({ ...params, output: segment.id }, task)
+    generateWithoutLLMStream({ ...params, output: segment.id }, task).catch((err) =>
+      failStreamTask(task, err as Error)
+    )
   }
 }
 export async function generateTTSStreamJson(formatedBody: Required<EdgeSchema>[], task: Task) {
@@ -83,7 +85,70 @@ export async function generateTTSStreamJson(formatedBody: Required<EdgeSchema>[]
   logger.info(`generateTTSStreamJson splitText length: ${formatedBody.length} `)
   const buildSegments = segments.map((segment) => ({ ...segment, output }))
   logger.info('buildSegments:', buildSegments)
-  buildSegmentList(buildSegments, task)
+  buildSegmentList(buildSegments, task).catch((err) => failStreamTask(task, err as Error))
+}
+
+/**
+ * 标记流式任务失败并中断响应：客户端 reader.read() 会 reject 走 onError，
+ * 绝不会把已生成的部分音频当成功收尾
+ */
+export function failStreamTask(task: Task, err: Error) {
+  logger.error(`Stream task ${task.id} failed: ${err.message}`)
+  if (taskManager.getTask(task.id)?.status === 'pending') {
+    taskManager.failTask(task.id, { message: err.message })
+  }
+  const res = (task.context as { res?: Response } | undefined)?.res
+  if (!res || res.writableEnded || res.destroyed) return
+  if (!res.headersSent) {
+    // 尚未发出任何音频字节：返回规范的 500 JSON，前端走通用错误处理
+    res.status(500).json({ code: 500, success: false, message: err.message })
+  } else {
+    // 已在传输中：只能断开连接，让客户端 read() reject 走 onError，绝不伪装成功
+    res.destroy(err)
+  }
+}
+
+/**
+ * 等待音频流结束。必须监听 error，且带看门狗：
+ * Edge 长连接可能中途挂起（既不 end 也不 error），超时后主动销毁并按失败处理，
+ * 否则整个生成会永远停在半截。
+ */
+function waitForStreamEnd(stream: Readable, timeoutMs = 90_000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      stream.destroy()
+      reject(new Error(`Audio stream did not finish within ${timeoutMs}ms`))
+    }, timeoutMs)
+    stream.once('end', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+    stream.once('error', (err) => {
+      clearTimeout(timer)
+      reject(err)
+    })
+  })
+}
+
+function generateEdgeStreamWithRetry(
+  segment: NormalizedSegment,
+  output: string,
+  maxRetries = 3
+): Promise<Readable> {
+  return safeRunWithRetry(
+    () =>
+      generateSingleVoiceStream({
+        ...segment,
+        output,
+        outputType: 'stream',
+      }) as Promise<Readable>,
+    {
+      retries: maxRetries,
+      baseDelayMs: 1000,
+      onError: (err: unknown, attempt) =>
+        logger.warn(`Edge stream attempt ${attempt} failed: ${(err as Error).message}`),
+    }
+  )
 }
 
 /**
@@ -92,65 +157,67 @@ export async function generateTTSStreamJson(formatedBody: Required<EdgeSchema>[]
 async function generateWithLLMStream(task: Task) {
   const { segment, voiceList, lang, res } = task.context as Required<NonNullable<Task['context']>>
   const { text, id } = segment
-  const { length, segments } = splitText(text.trim())
-  const formatLlmSegments = (llmSegments: any) =>
-    llmSegments
-      .filter((segment: any) => segment.text)
-      .map((segment: any) => ({
-        ...segment,
-        voice: segment.name,
-      }))
+  const { length, segments: textSegments } = splitText(text.trim())
   if (length <= 1) {
-    const prompt = getPrompt(lang, voiceList, segments[0])
-    logger.debug(`Prompt for LLM: ${prompt}`)
-    const llmResponse = await fetchLLMSegment(prompt)
-    let llmSegments = llmResponse?.result || llmResponse?.segments || []
-    if (!Array.isArray(llmSegments)) {
-      throw new Error(
-        'LLM response is not an array, please switch to Edge TTS mode or use another model'
-      )
-    }
-    buildSegmentList(formatLlmSegments(llmSegments), task)
+    const llmSegments = await fetchLlmSegments({ lang, voiceList, text: textSegments[0] })
+    await buildSegmentList(llmSegments, task)
   } else {
     const output = resolve(AUDIO_DIR, id)
     let count = 0
-    logger.info('Splitting text into multiple segments:', segments.length)
+    logger.info('Splitting text into multiple segments:', textSegments.length)
     const getProgress = () => {
-      return Number(((count / segments.length) * 100).toFixed(2))
+      return Number(((count / textSegments.length) * 100).toFixed(2))
     }
     const localStream = createWriteStream(output)
     const outputStream = new PassThrough()
     outputStream.pipe(res)
     outputStream.pipe(localStream)
+    let clientGone = false
+    // 落盘流必须挂 error 监听：任何 fs/写入错误若无人处理会以 unhandled 'error' 击垮进程
+    localStream.on('error', (err) => {
+      logger.error(`Local write stream error for task ${task.id}: ${err.message}`)
+      clientGone = true
+      outputStream.destroy()
+    })
+    res.on('close', () => {
+      if (res.writableEnded) return // 响应正常结束后的 close 不是客户端断开
+      clientGone = true
+      outputStream.destroy()
+      localStream.destroy()
+      // 客户端已离开，任务必须收尾，否则 pending 任务泄漏会占满 taskManager 上限
+      task.endTask?.(task.id)
+    })
 
-    for (let seg of segments) {
-      count++
-      const prompt = getPrompt(lang, voiceList, seg)
-      logger.debug(`Prompt for LLM: ${prompt}`)
-      const llmResponse = await fetchLLMSegment(prompt)
-      let llmSegments = llmResponse?.result || llmResponse?.segments || []
-      if (!Array.isArray(llmSegments)) {
-        throw new Error(
-          'LLM response is not an array, please switch to Edge TTS mode or use another model'
-        )
+    try {
+      for (const seg of textSegments) {
+        if (clientGone) {
+          logger.warn(`Client disconnected, abort LLM stream for task ${task.id}`)
+          return
+        }
+        count++
+        const llmSegments = await fetchLlmSegments({ lang, voiceList, text: seg })
+        for (const segment of llmSegments) {
+          if (clientGone) {
+            task.endTask?.(task.id)
+            return
+          }
+          const audioStream = await generateEdgeStreamWithRetry(segment, output)
+          audioStream.pipe(outputStream, { end: false })
+          await waitForStreamEnd(audioStream)
+        }
+        logger.info(`Progress: ${getProgress()}%`)
       }
-      for (let segment of formatLlmSegments(llmSegments)) {
-        const stream = (await generateSingleVoiceStream({
-          ...segment,
-          output,
-          outputType: 'stream',
-        })) as Readable
-        stream.pipe(outputStream, { end: false })
-        await new Promise((resolve) => {
-          stream.on('end', resolve)
-        })
-      }
-      logger.info(`Progress: ${getProgress()}%`)
+      outputStream.end()
+      task.endTask?.(task.id)
+      setTimeout(() => {
+        handleSrt(output)
+      }, 200)
+    } catch (err) {
+      logger.error(`LLM stream generation failed for task ${task.id}: ${(err as Error).message}`)
+      outputStream.destroy()
+      localStream.destroy()
+      failStreamTask(task, err as Error)
     }
-    outputStream.end()
-    setTimeout(() => {
-      handleSrt(output)
-    }, 200)
   }
 }
 const buildFinal = async (finalSegments: TTSResult[], id: string) => {
@@ -248,7 +315,7 @@ export async function handleSrt(audioPath: string, stream = true) {
   if (!fileList.length) return
   concatDirSrt({ jsonFiles: fileList, inputDir: tmpDir, outputFile: audioPath })
 }
-async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<void> {
+async function buildSegmentList(segments: NormalizedSegment[], task: Task): Promise<void> {
   const { res, segment } = task.context as Required<NonNullable<Task['context']>>
   const { id: outputId } = segment
   const totalSegments = segments.length
@@ -315,13 +382,14 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
       // TODO: Concurrency of streaming flow
       const audioStream = await generateWithRetry()
       await audioStream.pipe(outputStream, { end: false })
-      await new Promise((resolve) => audioStream.on('end', resolve))
+      await waitForStreamEnd(audioStream)
       completedSegments++
       logger.info(`processing text:\n ${segment.text.slice(0, 10)}...`)
       logger.info(`Segment ${index + 1}/${totalSegments} completed. Progress: ${progress()}%`)
       await processSegment(index + 1)
     } catch (err) {
-      const { segmentIndex, attempt, message } = err as SegmentError
+      // 错误可能来自消费阶段（waitForStreamEnd）而非生成阶段，字段可能缺失
+      const { segmentIndex = index, attempt = maxRetries, message } = err as SegmentError
       logger.error(`Segment ${segmentIndex + 1} failed after ${attempt} retries: ${message}`)
       outputStream.emit('error', err)
     }
@@ -362,40 +430,6 @@ function validateLangAndVoice(lang: string, voice: string, res: Response): boole
     return false
   }
   return true
-}
-
-/**
- * 从 LLM 获取分段参数
- */
-async function fetchLLMSegment(prompt: string): Promise<any> {
-  const response = await openai.createChatCompletion({
-    messages: [
-      {
-        role: 'system',
-        content: 'You are a helpful assistant. And you can return valid json object',
-      },
-      { role: 'user', content: prompt },
-    ],
-    // temperature: 0.7,
-    // max_tokens: 500,
-    response_format: { type: 'json_object' },
-  })
-
-  if (!response.choices[0].message.content) {
-    throw new Error(ErrorMessages.INVALID_API_RESPONSE)
-  }
-  return parseLLMResponse(response)
-}
-
-/**
- * 解析 LLM 响应
- */
-function parseLLMResponse(response: any): TTSParams {
-  const params = JSON.parse(response.choices[0].message.content) as TTSParams
-  if (!params || typeof params !== 'object') {
-    throw new Error(ErrorMessages.INVALID_PARAMS_FORMAT)
-  }
-  return params
 }
 
 /**
@@ -451,9 +485,14 @@ export async function concatDirSrt({
     )
   if (!_jsonFiles.length) throw new Error('No JSON files found for subtitles')
 
-  const subtitleFiles: SubtitleFiles = await Promise.all(
-    _jsonFiles.map((file) => readJson<SubtitleFile>(file))
-  )
+  const subtitleFiles = (
+    await Promise.all(_jsonFiles.map((file) => readJson<SubtitleFile>(file)))
+  ).filter((subtitle): subtitle is SubtitleFile => Array.isArray(subtitle))
+  // 克隆等非 Edge 音源没有字幕数据：跳过字幕合并，不视为失败
+  if (!subtitleFiles.length) {
+    logger.warn('No subtitle data found, skip srt merge')
+    return
+  }
   const mergedJson = mergeSubtitleFiles(subtitleFiles)
   const tempJsonPath = path.resolve(inputDir, 'all_splits.mp3.json')
   await fs.writeFile(tempJsonPath, JSON.stringify(mergedJson, null, 2))
