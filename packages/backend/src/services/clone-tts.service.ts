@@ -69,8 +69,8 @@ function rateToSpeed(rate?: string): number {
 
 /**
  * 用自定义音色合成语音。对接 daswer123/xtts-api-server 协议：
- * GET /tts_stream?text=&speaker_wav=&language=（speaker_wav 为参考音频 URL，服务端拉取）。
- * 失败/超时抛错，由调用方降级。
+ * POST /tts_to_audio/ JSON {text, speaker_wav(容器内绝对路径), language, speed} -> wav 音频。
+ * 参考音频目录已挂载到容器的 /app/speakers。
  */
 export async function synthesizeCloneVoice(
   text: string,
@@ -87,17 +87,23 @@ export async function synthesizeCloneVoice(
   const entry = voices.find((v) => v.voice === voice)
   if (!entry) throw new Error(`未找到自定义音色：${voice}`)
 
-  const speakerWav = `${settings.wavUrlPrefix.replace(/\/$/, '')}/custom-voices/${encodeURIComponent(entry.file)}`
-  const url = new URL(`${settings.baseUrl.replace(/\/$/, '')}/tts_stream`)
-  url.searchParams.set('text', text)
-  url.searchParams.set('speaker_wav', speakerWav)
-  url.searchParams.set('language', settings.language || 'zh')
-
-  logger.info(`Clone TTS request: ${url.host}${url.pathname} (${text.length} chars, voice=${voice})`)
-  const response = await fetcher.get(url.toString(), undefined, {
-    responseType: opts.mode === 'stream' ? 'stream' : 'arraybuffer',
-    timeout: 600_000,
-  })
+  const body = {
+    text,
+    speaker_wav: `/app/speakers/${entry.file}`,
+    language: settings.language || 'zh-cn',
+    speed: rateToSpeed(opts.rate),
+  }
+  logger.info(
+    `Clone TTS request: ${settings.baseUrl}/tts_to_audio/ (${text.length} chars, voice=${voice})`
+  )
+  const response = await fetcher.post(
+    `${settings.baseUrl.replace(/\/$/, '')}/tts_to_audio/`,
+    body,
+    {
+      responseType: opts.mode === 'stream' ? 'stream' : 'arraybuffer',
+      timeout: 600_000,
+    }
+  )
   logger.info(`Clone TTS response: status=${response.status}`)
   if (opts.mode === 'stream') {
     return response.data as Readable
