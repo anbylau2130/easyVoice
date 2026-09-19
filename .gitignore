@@ -19,5 +19,8 @@ packages/backend/e2e-tts-req.json
 .codegraph/
 .mimosa/
 **/.mimosa/
+# 用户本地测试资源：电子书与参考音频（仅忽略仓库根目录，避免误伤源码目录）
+/book/
+/voices/
 packages/backend/_tmp.srt.json*
 xtts-api-server.tar
