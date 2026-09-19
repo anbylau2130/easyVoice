@@ -31,25 +31,14 @@ export async function runEdgeTTS({
   outputType = 'file',
   style,
   styleDegree,
+  lang,
 }: Omit<EdgeSchema, 'useLLM'> & {
   output: string
   outputType?: string
   style?: string
   styleDegree?: string
+  lang?: string
 }) {
-  // 自定义音色（声音克隆）：路由到本地克隆 TTS 服务
-  if (isCustomVoice(voice)) {
-    logger.info(`Custom voice synthesis: ${voice} (${text.length} chars, ${outputType})`)
-    if (outputType === 'file') {
-      await synthesizeCloneVoice(text, voice, { rate, mode: 'buffer', output })
-      return {
-        audio: output,
-        srt: output.replace('.mp3', '.srt'),
-        file: '',
-      }
-    }
-    return synthesizeCloneVoice(text, voice, { rate, mode: 'stream' })
-  }
   // 自定义音色（声音克隆）：路由到本地克隆 TTS 服务
   if (isCustomVoice(voice)) {
     logger.info(`Custom voice synthesis: ${voice} (${text.length} chars, ${outputType})`)

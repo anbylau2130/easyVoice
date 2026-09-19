@@ -67,8 +67,7 @@ services:
     volumes:
       # 模型缓存持久化（避免重建容器重复下载）
       - xtts-models:/app/xtts_models
-      # 说话人参考目录：EasyVoice 的 custom-voices 子目录在此可见，
-      # EasyVoice 会把参考音频路径传给本服务
+      # 说话人参考目录：挂载整个 audio 卷，参考 wav 在 /app/speakers/custom-voices/
       - easyvoice-audio:/app/speakers
 
 volumes:
