@@ -42,8 +42,8 @@ export async function getCloneSettings(): Promise<Required<CloneSettings>> {
   return {
     baseUrl: stored.baseUrl || process.env.TTS_CLONE_URL || '',
     language: normalizeLanguage(stored.language || process.env.TTS_CLONE_LANGUAGE || 'zh-cn'),
-    // 克隆服务容器内看到的说话人目录（compose 默认卷挂载路径）
-    speakersDir: stored.speakersDir || process.env.TTS_CLONE_SPEAKERS_DIR || '/app/speakers',
+    // 克隆服务容器内看到的说话人目录（compose 挂载整个 audio 卷，参考音频在其 custom-voices 子目录）
+    speakersDir: stored.speakersDir || process.env.TTS_CLONE_SPEAKERS_DIR || '/app/speakers/custom-voices',
     wavUrlPrefix: stored.wavUrlPrefix || process.env.TTS_CLONE_WAV_URL_PREFIX || '',
   }
 }
@@ -185,9 +185,13 @@ export async function synthesizeCloneVoice(
   const entry = voices.find((v) => v.voice === voice)
   if (!entry) throw new Error(`未找到自定义音色：${voice}`)
 
+  // 复校已存储地址（防绕过设置页校验的手工篡改）
+  const check = validateCloneBaseUrl(settings.baseUrl)
+  if (!check.ok) throw new Error(`克隆服务地址无效：${check.message}`)
+
   const body = {
     text,
-    speaker_wav: `/app/speakers/${entry.file}`,
+    speaker_wav: `${settings.speakersDir.replace(/\/$/, '')}/${entry.file}`,
     language: settings.language || 'zh-cn',
     speed: rateToSpeed(opts.rate),
   }
