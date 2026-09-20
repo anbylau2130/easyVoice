@@ -54,3 +54,70 @@ export const deleteCustomVoice = async (id: string) => {
   }
   return response.data?.message
 }
+
+/** 克隆音色试听：XTTS 纯 CPU 推理较慢，返回音频 Blob */
+export const previewCustomVoice = async (id: string): Promise<Blob> => {
+  const response = await api.post<Blob>(`/custom/${id}/preview`, {}, { responseType: 'blob' })
+  return response.data
+}
+
+// ===== 自定义 Edge 音色预设 =====
+
+export interface VoicePreset {
+  id: string
+  name: string
+  /** 基础 Edge 音色（voice.json 中的 Name） */
+  voice: string
+  rate?: string
+  pitch?: string
+  volume?: string
+  style?: string
+  gender?: string
+  createdAt: string
+}
+
+export interface VoicePresetPayload {
+  name: string
+  voice: string
+  rate?: string
+  pitch?: string
+  volume?: string
+  style?: string
+  gender?: string
+}
+
+export const listVoicePresets = async (): Promise<VoicePreset[]> => {
+  const response = await api.get<{ success: boolean; code: number; data: VoicePreset[] }>(
+    '/presets'
+  )
+  return response.data?.data || []
+}
+
+export const saveVoicePreset = async (payload: VoicePresetPayload): Promise<VoicePreset> => {
+  const response = await api.post<{
+    success: boolean
+    code: number
+    message?: string
+    data: VoicePreset
+  }>('/presets', payload)
+  if (response.data?.code !== 200) {
+    throw new Error(response.data?.message || '保存失败')
+  }
+  return response.data.data
+}
+
+export const deleteVoicePreset = async (id: string) => {
+  const response = await api.delete<{ success: boolean; code: number; message?: string }>(
+    `/presets/${id}`
+  )
+  if (response.data?.code !== 200) {
+    throw new Error(response.data?.message || '删除失败')
+  }
+  return response.data?.message
+}
+
+/** 预设试听：返回音频 Blob（axios 需要显式声明泛型才能拿到 Blob 类型） */
+export const previewPresetVoice = async (payload: VoicePresetPayload): Promise<Blob> => {
+  const response = await api.post<Blob>('/presets/preview', payload, { responseType: 'blob' })
+  return response.data
+}

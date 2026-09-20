@@ -80,8 +80,9 @@ export function getPrompt(lang = 'cn', voiceList: VoiceConfig[], text: string) {
   switch (lang) {
     case 'zh':
     case 'cn':
+      // AI 选音色仅限大陆普通话（zh-CN），避免粤语/台湾腔混入
       return cnTemplate(
-        voiceList.filter((voice) => voice.Name.startsWith('zh')),
+        voiceList.filter((voice) => voice.Name.startsWith('zh-CN')),
         text
       )
     case 'eng':
@@ -200,8 +201,9 @@ export function getCharacterPlanPrompt(
   voiceList: { Name: string }[],
   sample: string
 ) {
+  // 中文书 AI 只从大陆普通话（zh-CN）音色中挑选；英文书保持 en
   const filtered = voiceList.filter((voice) =>
-    voice.Name.startsWith(lang === 'eng' ? 'en' : 'zh')
+    voice.Name.startsWith(lang === 'eng' ? 'en' : 'zh-CN')
   )
   return lang === 'eng' ? engPlanTemplate(filtered, sample) : cnPlanTemplate(filtered, sample)
 }

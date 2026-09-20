@@ -6,6 +6,7 @@ import fs from 'fs/promises'
 import { ALLOWED_EXTENSIONS, AUDIO_DIR } from '../config'
 import { EdgeSchema } from '../schema/generate'
 import taskManager from '../utils/taskManager'
+import { listVoicePresets } from '../services/voicePreset.service'
 function formatBody({ text, pitch, voice, volume, rate, useLLM }: EdgeSchema) {
   const positivePercent = (value: string | undefined) => {
     if (value === '0%' || value === '0' || value === undefined) return '+0%'
@@ -162,9 +163,18 @@ export async function getVoiceList(req: Request, res: Response, next: NextFuncti
   try {
     logger.debug('Fetching voice list...')
     const voices = require('../llm/prompt/voice.json')
+    // 自定义 Edge 音色预设追加在系统音色之后，所有选音色的地方（含 AI 配音）可直接选用
+    const presets = await listVoicePresets()
+    const presetVoices = presets.map((p) => ({
+      Name: p.id,
+      cnName: `🎛️ ${p.name}`,
+      Gender: p.gender || 'Female',
+      ContentCategories: ['自定义'],
+      VoicePersonalities: [p.voice],
+    }))
     res.json({
       code: 200,
-      data: voices,
+      data: [...voices, ...presetVoices],
       success: true,
     })
   } catch (err) {

@@ -59,7 +59,9 @@
         <p class="settings-tip">
           上传一段清晰的语音（wav/mp3 等，建议 1-5 分钟、单一说话人），AI
           将克隆该音色用于朗读。需要在本机运行声音克隆服务（如
-          xtts-api-server），并在下方配置服务地址。克隆音色合成速度取决于硬件，无 GPU 时较慢。
+          xtts-api-server），并在下方配置服务地址；参考音频通过目录挂载供克隆服务读取。
+          克隆音色合成速度取决于硬件，无 GPU 时较慢（每句约 10~40 秒），长篇有声书建议优先使用
+          Edge 音色或 Edge 预设。
         </p>
         <div class="config-grid">
           <div class="config-item">
@@ -69,10 +71,6 @@
           <div class="config-item">
             <label>合成语言</label>
             <el-input v-model="cloneForm.language" placeholder="zh" />
-          </div>
-          <div class="config-item">
-            <label>参考音频地址前缀</label>
-            <el-input v-model="cloneForm.wavUrlPrefix" placeholder="http://127.0.0.1:3000" />
           </div>
         </div>
         <div class="settings-actions">
@@ -114,11 +112,106 @@
         <el-alert v-if="uploadError" :title="uploadError" type="error" :closable="false" class="failed-alert" />
 
         <el-table v-if="customVoices.length" :data="customVoices" size="small" max-height="220">
-          <el-table-column prop="name" label="名称" width="180" />
-          <el-table-column prop="voice" label="音色 ID" min-width="200" show-overflow-tooltip />
-          <el-table-column label="操作" width="90">
+          <el-table-column prop="name" label="名称" width="150" />
+          <el-table-column prop="voice" label="音色 ID" min-width="190" show-overflow-tooltip />
+          <el-table-column label="操作" width="130">
             <template #default="{ row }">
+              <el-button
+                link
+                type="primary"
+                :disabled="clonePreviewingId === row.id"
+                @click="handlePreviewCloneVoice(row)"
+              >
+                {{ clonePreviewingId === row.id ? '合成中' : '试听' }}
+              </el-button>
               <el-button type="danger" link @click="handleDeleteVoice(row.id)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </template>
+    </section>
+
+    <!-- 自定义 Edge 音色（快速预设） -->
+    <section class="section">
+      <div class="settings-head" @click="presetOpen = !presetOpen">
+        <h2 class="section-title">🎛️ 自定义音色（Edge 预设）</h2>
+        <el-tag :type="voicePresets.length ? 'success' : 'info'" size="small">
+          {{ voicePresets.length ? `已有 ${voicePresets.length} 个` : '未创建' }}
+        </el-tag>
+        <span class="settings-toggle">{{ presetOpen ? '收起 ▲' : '展开 ▼' }}</span>
+      </div>
+      <template v-if="presetOpen">
+        <p class="settings-tip">
+          基于任意 Edge 内置音色自定义语速 / 音调 / 情感风格，保存为可直接选用的音色。生成速度与普通
+          Edge 音色完全一致（无需克隆推理），适合长篇有声书；克隆音色较慢，建议只给少数重点角色使用。
+          保存后可在下方音色选择和 AI 智能配音中使用。
+        </p>
+        <div class="config-grid">
+          <div class="config-item">
+            <label>音色名称</label>
+            <el-input v-model="presetForm.name" placeholder="如：低沉说书人" maxlength="30" />
+          </div>
+          <div class="config-item">
+            <label>基础音色</label>
+            <el-select
+              v-model="presetForm.voice"
+              filterable
+              placeholder="选择 Edge 内置音色"
+              style="width: 100%"
+            >
+              <el-option
+                v-for="v in presetBaseVoices"
+                :key="v.Name"
+                :value="v.Name"
+                :label="v.cnName || v.Name"
+              />
+            </el-select>
+          </div>
+          <div class="config-item">
+            <label>情感风格（仅晓伊/云希等部分音色支持）</label>
+            <el-select v-model="presetForm.style" clearable placeholder="默认（不加风格）">
+              <el-option v-for="s in presetStyles" :key="s" :value="s" :label="presetStyleLabel(s)" />
+            </el-select>
+          </div>
+          <div class="config-item sliders">
+            <label>语速 {{ presetForm.rate > 0 ? '+' : '' }}{{ presetForm.rate }}%</label>
+            <el-slider v-model="presetForm.rate" :min="-50" :max="100" :step="5" />
+          </div>
+          <div class="config-item sliders">
+            <label>音调 {{ presetForm.pitch > 0 ? '+' : '' }}{{ presetForm.pitch }}Hz</label>
+            <el-slider v-model="presetForm.pitch" :min="-50" :max="50" :step="5" />
+          </div>
+        </div>
+        <div class="settings-actions">
+          <el-button :loading="presetPreviewing" @click="handlePreviewPreset">试听效果</el-button>
+          <el-button type="primary" :loading="presetSaving" @click="handleSavePreset">
+            保存音色
+          </el-button>
+        </div>
+
+        <el-table
+          v-if="voicePresets.length"
+          :data="voicePresets"
+          size="small"
+          max-height="220"
+          style="margin-top: 12px"
+        >
+          <el-table-column prop="name" label="名称" width="150" />
+          <el-table-column prop="voice" label="基础音色" min-width="180" show-overflow-tooltip />
+          <el-table-column label="参数" min-width="180">
+            <template #default="{ row }">{{ presetParamsText(row) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="130">
+            <template #default="{ row }">
+              <el-button
+                link
+                type="primary"
+                :disabled="presetPreviewingId === row.id"
+                @click="handlePreviewSavedPreset(row)"
+              >
+                {{ presetPreviewingId === row.id ? '合成中' : '试听' }}
+              </el-button>
+              <el-button link type="danger" @click="handleDeletePreset(row.id)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -574,7 +667,13 @@ import {
   deleteCustomVoice,
   listCustomVoices,
   uploadCustomVoice,
+  previewCustomVoice,
+  deleteVoicePreset,
+  listVoicePresets,
+  previewPresetVoice,
+  saveVoicePreset,
   type CustomVoice,
+  type VoicePreset,
 } from '@/api/voices'
 import { LoaderCircle } from 'lucide-vue-next'
 import {
@@ -654,7 +753,161 @@ let previewAudio: HTMLAudioElement | null = null
 // 自定义音色（声音克隆）
 const customVoices = ref<CustomVoice[]>([])
 const cloneOpen = ref(false)
-const cloneForm = ref({ baseUrl: '', language: 'zh', wavUrlPrefix: 'http://127.0.0.1:3000' })
+
+// 自定义 Edge 音色预设
+const presetOpen = ref(false)
+const voicePresets = ref<VoicePreset[]>([])
+const presetForm = ref({ name: '', voice: '', rate: 0, pitch: 0, style: '' })
+const presetSaving = ref(false)
+const presetPreviewing = ref(false)
+const presetPreviewingId = ref('')
+let presetAudio: HTMLAudioElement | null = null
+const presetStyles = [
+  'cheerful',
+  'sad',
+  'angry',
+  'fearful',
+  'disgruntled',
+  'serious',
+  'affectionate',
+  'gentle',
+  'calm',
+  'lyrical',
+  'narration-professional',
+  'narration-relaxed',
+  'documentary-narration',
+]
+const presetStyleLabels: Record<string, string> = {
+  cheerful: '欢快',
+  sad: '悲伤',
+  angry: '愤怒',
+  fearful: '恐惧',
+  disgruntled: '不满',
+  serious: '严肃',
+  affectionate: '深情',
+  gentle: '温柔',
+  calm: '平静',
+  lyrical: '抒情',
+  'narration-professional': '专业旁白',
+  'narration-relaxed': '轻松旁白',
+  'documentary-narration': '纪录片旁白',
+}
+function presetStyleLabel(style: string) {
+  return presetStyleLabels[style] || style
+}
+// 预设基础音色候选：纯系统音色（从后端 voiceList 中排除预设与克隆项）
+const presetBaseVoices = computed(() =>
+  voiceList.value.filter((v) => !v.Name.startsWith('custom-') && !v.Name.startsWith('edge-'))
+)
+function presetParamsText(row: VoicePreset) {
+  const parts: string[] = []
+  if (row.rate && row.rate !== '+0%') parts.push(`语速 ${row.rate}`)
+  if (row.pitch && row.pitch !== '+0Hz') parts.push(`音调 ${row.pitch}`)
+  if (row.volume && row.volume !== '+0%') parts.push(`音量 ${row.volume}`)
+  if (row.style) parts.push(`风格 ${presetStyleLabel(row.style)}`)
+  return parts.length ? parts.join('，') : '默认'
+}
+const rateStr = (n: number) => (n > 0 ? `+${n}%` : `${n}%`)
+const pitchStr = (n: number) => (n > 0 ? `+${n}Hz` : `${n}Hz`)
+async function playPresetBlob(blob: Blob) {
+  presetAudio?.pause()
+  presetAudio = new Audio(URL.createObjectURL(blob))
+  await presetAudio.play()
+}
+// 克隆音色试听（XTTS 纯 CPU 推理较慢，按钮显示「合成中」）
+const clonePreviewingId = ref('')
+async function handlePreviewCloneVoice(row: CustomVoice) {
+  clonePreviewingId.value = row.id
+  try {
+    const blob = await previewCustomVoice(row.id)
+    await playPresetBlob(blob)
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    clonePreviewingId.value = ''
+  }
+}
+async function loadVoicePresets() {
+  voicePresets.value = await listVoicePresets().catch(() => [])
+}
+async function handlePreviewPreset() {
+  if (!presetForm.value.voice) {
+    ElMessage.warning('请先选择基础音色')
+    return
+  }
+  presetPreviewing.value = true
+  try {
+    const blob = await previewPresetVoice({
+      name: presetForm.value.name,
+      voice: presetForm.value.voice,
+      rate: rateStr(presetForm.value.rate),
+      pitch: pitchStr(presetForm.value.pitch),
+      style: presetForm.value.style,
+    })
+    await playPresetBlob(blob)
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    presetPreviewing.value = false
+  }
+}
+async function handlePreviewSavedPreset(row: VoicePreset) {
+  presetPreviewingId.value = row.id
+  try {
+    const blob = await previewPresetVoice({
+      name: row.name,
+      voice: row.voice,
+      rate: row.rate,
+      pitch: row.pitch,
+      volume: row.volume,
+      style: row.style,
+    })
+    await playPresetBlob(blob)
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    presetPreviewingId.value = ''
+  }
+}
+async function handleSavePreset() {
+  if (!presetForm.value.name.trim()) {
+    ElMessage.warning('请填写音色名称')
+    return
+  }
+  if (!presetForm.value.voice) {
+    ElMessage.warning('请选择基础音色')
+    return
+  }
+  presetSaving.value = true
+  try {
+    const gender = presetBaseVoices.value.find((v) => v.Name === presetForm.value.voice)?.Gender
+    const entry = await saveVoicePreset({
+      name: presetForm.value.name,
+      voice: presetForm.value.voice,
+      rate: rateStr(presetForm.value.rate),
+      pitch: pitchStr(presetForm.value.pitch),
+      style: presetForm.value.style,
+      gender,
+    })
+    ElMessage.success(`已保存：${entry.name}（${entry.id}）`)
+    presetForm.value = { name: '', voice: '', rate: 0, pitch: 0, style: '' }
+    await loadVoicePresets()
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  } finally {
+    presetSaving.value = false
+  }
+}
+async function handleDeletePreset(id: string) {
+  try {
+    await deleteVoicePreset(id)
+    ElMessage.success('已删除')
+    await loadVoicePresets()
+  } catch (err) {
+    ElMessage.error((err as Error).message)
+  }
+}
+const cloneForm = ref({ baseUrl: '', language: 'zh' })
 const savingClone = ref(false)
 const testingClone = ref(false)
 const cloneTestResult = ref<{ ok: boolean; message: string; latencyMs: number } | null>(null)
@@ -665,6 +918,7 @@ const newVoiceName = ref('')
 const filteredVoices = computed(() => {
   const system = voiceList.value
     .filter((voice) => voice.Name.startsWith(selectedLanguage.value))
+    .filter((voice) => !voice.Name.startsWith('edge-'))
     .map((voice) => ({ ...voice, cnName: mapZHVoiceName(voice.Name) ?? voice.Name }))
   // 自定义克隆音色始终可选（不受语言过滤限制）
   const custom = customVoices.value.map((v) => ({
@@ -675,7 +929,15 @@ const filteredVoices = computed(() => {
     ContentCategories: [] as string[],
     VoicePersonalities: [] as string[],
   }))
-  return [...custom, ...system]
+  // 自定义 Edge 音色预设始终可选
+  const presets = voicePresets.value.map((p) => ({
+    Name: p.id,
+    cnName: `🎛️ ${p.name}`,
+    Gender: p.gender || '',
+    ContentCategories: [] as string[],
+    VoicePersonalities: [] as string[],
+  }))
+  return [...custom, ...presets, ...system]
 })
 const chapterOffset = computed(() => (chapterPage.value - 1) * chapterPageSize)
 const pagedChapters = computed(() =>
@@ -753,10 +1015,12 @@ function failedRowClass({ row }: { row: { status: ChapterStatus } }) {
 }
 
 const voiceOptions = computed(() => {
-  const system = voiceList.value.map((voice) => ({
-    ...voice,
-    cnName: voice.Name.startsWith('zh') ? (mapZHVoiceName(voice.Name) ?? voice.Name) : voice.Name,
-  }))
+  const system = voiceList.value
+    .filter((voice) => !voice.Name.startsWith('edge-'))
+    .map((voice) => ({
+      ...voice,
+      cnName: voice.Name.startsWith('zh') ? (mapZHVoiceName(voice.Name) ?? voice.Name) : voice.Name,
+    }))
   const custom = customVoices.value.map((v) => ({
     Name: v.voice,
     cnName: `🎙️ ${v.name}（克隆）`,
@@ -764,7 +1028,14 @@ const voiceOptions = computed(() => {
     ContentCategories: [] as string[],
     VoicePersonalities: [] as string[],
   }))
-  return [...custom, ...system]
+  const presets = voicePresets.value.map((p) => ({
+    Name: p.id,
+    cnName: `🎛️ ${p.name}`,
+    Gender: p.gender || '',
+    ContentCategories: [] as string[],
+    VoicePersonalities: [] as string[],
+  }))
+  return [...custom, ...presets, ...system]
 })
 const hasCharacterVoices = computed(() => !!bookDetail.value?.characterVoices?.length)
 
@@ -887,10 +1158,12 @@ function filterVoiceOptions() {
   const system = voiceList.value.filter((v) => v.Name.startsWith(selectedLanguage.value))
   const candidates = [
     ...customVoices.value.map((v) => v.voice),
+    ...voicePresets.value.map((p) => p.id),
     ...system.map((v) => v.Name),
   ]
   if (!candidates.includes(selectedVoice.value)) {
-    selectedVoice.value = customVoices.value[0]?.voice || system[0]?.Name || ''
+    selectedVoice.value =
+      customVoices.value[0]?.voice || voicePresets.value[0]?.id || system[0]?.Name || ''
   }
 }
 
@@ -980,7 +1253,11 @@ async function loadCloneSettings() {
 async function handleSaveCloneSettings() {
   savingClone.value = true
   try {
-    await saveCloneSettings({ ...cloneForm.value })
+    // 仅保存本卡片管理的字段（load 时展开进表单的 speakersDir 等后端字段不回写）
+    await saveCloneSettings({
+      baseUrl: cloneForm.value.baseUrl,
+      language: cloneForm.value.language,
+    })
     cloneTestResult.value = null
     ElMessage.success('克隆服务配置已保存')
   } catch (error) {
@@ -997,8 +1274,6 @@ async function handleTestClone() {
     const payload: Record<string, string> = {}
     if (cloneForm.value.baseUrl.trim()) payload.baseUrl = cloneForm.value.baseUrl.trim()
     if (cloneForm.value.language.trim()) payload.language = cloneForm.value.language.trim()
-    if (cloneForm.value.wavUrlPrefix.trim())
-      payload.wavUrlPrefix = cloneForm.value.wavUrlPrefix.trim()
     const r = await testCloneSettings(payload)
     cloneTestResult.value = r
     if (r.ok) ElMessage.success('克隆服务连接成功')
@@ -1267,6 +1542,7 @@ onMounted(async () => {
   refreshBooks()
   loadLlmSettings()
   loadCustomVoices()
+  loadVoicePresets()
   loadCloneSettings()
   tickTimer = setInterval(() => (nowTick.value = Date.now()), 1000)
 })
@@ -1277,6 +1553,7 @@ onBeforeUnmount(() => {
     tickTimer = null
   }
   previewAudio?.pause()
+  presetAudio?.pause()
 })
 </script>
 

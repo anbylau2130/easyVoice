@@ -50,7 +50,8 @@ export const saveLlmSettings = async (payload: LlmSettingsPayload): Promise<LlmS
 export interface CloneSettings {
   baseUrl: string
   language: string
-  wavUrlPrefix: string
+  /** 已废弃：当前克隆服务（xtts-api-server）不支持 URL 拉取参考音频，仅保留存储兼容 */
+  wavUrlPrefix?: string
 }
 
 export interface CloneTestResult {

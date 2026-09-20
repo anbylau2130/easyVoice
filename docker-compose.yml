@@ -26,7 +26,8 @@ services:
       - FFMPEG_PATH=/usr/bin/ffmpeg
       # 声音克隆服务（daswer123/xtts-api-server），compose 网络内服务名直连
       - TTS_CLONE_URL=http://xtts-server:8020
-      - TTS_CLONE_SPEAKERS_DIR=/app/speakers
+      # 克隆服务容器内看到的说话人目录（audio 卷挂载于 /app/speakers，参考 wav 在 custom-voices 子目录）
+      - TTS_CLONE_SPEAKERS_DIR=/app/speakers/custom-voices
       # AI 配音规划用 LLM（也可在页面「AI 模型配置」卡片填写，优先级更高）
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}

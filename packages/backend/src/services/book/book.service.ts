@@ -6,6 +6,7 @@ import { logger } from '../../utils/logger'
 import { asyncSleep, ensureDir, getLangConfig, readJson } from '../../utils'
 import { generateTTS, TtsProgressCallback } from '../tts.service'
 import { planCharacterVoices, CharacterVoice } from '../../llm/segmentParser'
+import { listVoicePresets } from '../voicePreset.service'
 import { listCustomVoices } from '../customVoice.service'
 import type { ParsedChapter } from './chapter.service'
 
@@ -500,11 +501,22 @@ export async function planBookVoices(id: string): Promise<void> {
         }
         const { lang, voiceList } = await getLangConfig(sample || book.title)
         const customVoices = await listCustomVoices()
+        // 自定义 Edge 音色预设作为候选：并入 voiceList（带性别供 AI 匹配）并加入 extraVoices（不受语言过滤限制）
+        const presets = await listVoicePresets()
+        const presetVoiceEntries = presets.map((p) => ({
+          Name: p.id,
+          Gender: p.gender || '',
+          ContentCategories: ['自定义'],
+          VoicePersonalities: [p.voice],
+        }))
         book.characterVoices = await planCharacterVoices({
           lang,
-          voiceList,
+          voiceList: [...voiceList, ...presetVoiceEntries],
           sampleText: sample,
-          extraVoices: customVoices.map((v) => v.voice),
+          extraVoices: [
+            ...customVoices.map((v) => v.voice),
+            ...presets.map((p) => p.id),
+          ],
           // 用户在创建时选择的音色作为旁白基准
           narratorVoice: book.params.voice,
         })
@@ -541,6 +553,7 @@ export async function saveCharacterVoices(
   const validVoices = new Set([
     ...(await allVoiceNames()),
     ...(await listCustomVoices()).map((v) => v.voice),
+    ...(await listVoicePresets()).map((p) => p.id),
   ])
   const existing = new Map((book.characterVoices || []).map((c) => [c.character, c] as const))
   const seen = new Set<string>()

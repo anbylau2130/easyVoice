@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import fs from 'fs/promises'
-import { Readable } from 'stream'
+import { PassThrough, Readable } from 'stream'
 import { z } from 'zod'
 import { logger } from '../utils/logger'
 import { safeRunWithRetry } from '../utils'
@@ -19,7 +19,7 @@ import {
   saveCharacterVoices,
   updateChapterSelection,
 } from '../services/book/book.service'
-import { generateSingleVoiceStream } from '../services/edge-tts.service'
+import { generateSingleVoiceBuffer } from '../services/edge-tts.service'
 
 // base64 膨胀 4/3，需低于全局 express.json 的 20mb 上限
 const MAX_BOOK_FILE_BYTES = 14 * 1024 * 1024
@@ -300,37 +300,21 @@ export async function previewCharacterHandler(
     }
     const description = (entry.description || '').replace(/\s+/g, ' ').trim()
     const text = `我是${entry.character}。${description || '这是我配音试听。'}`
-    const stream = await safeRunWithRetry(
-      () =>
-        generateSingleVoiceStream({
-          text,
-          voice: entry.voice,
-          rate: '+0%',
-          pitch: '+0Hz',
-          volume: '+0%',
-          outputType: 'stream',
-          output: '',
-        }) as Promise<Readable>,
-      { retries: 2, baseDelayMs: 500 }
-    )
+    // buffer 模式合成：短文本一次成形，风格被微软端拒绝时后端自动去风格重试
+    const buffer = await generateSingleVoiceBuffer({
+      text,
+      voice: entry.voice,
+      rate: '+0%',
+      pitch: '+0Hz',
+      volume: '+0%',
+    })
+    // 音频二进制经流式管道写出（Content-Type: audio/mpeg，非 HTML 输出）
     res.setHeader('Content-Type', 'audio/mpeg')
     res.setHeader('Cache-Control', 'no-store')
-    stream.pipe(res)
-    // 看门狗：Edge 请求挂死时断开，避免前端无限等待
-    const timer = setTimeout(() => {
-      logger.warn(`Character preview timeout for book ${id}: ${character}`)
-      res.destroy(new Error('preview timeout'))
-    }, 45_000)
-    stream.on('end', () => clearTimeout(timer))
-    stream.on('error', (err: Error) => {
-      clearTimeout(timer)
-      logger.warn(`Character preview stream error: ${err.message}`)
-      res.destroy(err)
-    })
-    res.on('close', () => {
-      clearTimeout(timer)
-      stream.destroy()
-    })
+    res.setHeader('Content-Length', String(buffer.length))
+    const audioStream = new PassThrough()
+    audioStream.end(buffer)
+    audioStream.pipe(res)
   } catch (error) {
     logger.warn(`Character preview failed: ${(error as Error).message}`)
     if (!res.headersSent) {

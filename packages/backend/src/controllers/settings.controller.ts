@@ -52,6 +52,8 @@ export async function saveLlmSettingsHandler(req: Request, res: Response, next: 
 const cloneSettingsSchema = z.object({
   baseUrl: z.string().trim().optional(),
   language: z.string().trim().optional(),
+  // 克隆服务容器内说话人目录（高级配置，随部署拓扑而定）
+  speakersDir: z.string().trim().optional(),
   wavUrlPrefix: z
     .string()
     .trim()

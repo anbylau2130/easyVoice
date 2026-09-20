@@ -306,14 +306,19 @@ export async function planCharacterVoices({
   /** 指定旁白音色（叙述占比最大，允许用户指定） */
   narratorVoice?: string
 }): Promise<CharacterVoice[]> {
+  // AI 候选音色：中文书仅限大陆普通话（zh-CN），避免粤语/台湾腔被选中；英文书保持 en。
+  // extraVoices（用户自建的克隆音色/预设）不受此限制
   const langFiltered = voiceList
-    .filter((voice) => voice.Name.startsWith(lang === 'eng' ? 'en' : 'zh'))
+    .filter((voice) => voice.Name.startsWith(lang === 'eng' ? 'en' : 'zh-CN'))
     .map((voice) => voice.Name)
   const allowedVoices = [...langFiltered, ...extraVoices]
-  const promptVoiceList = [
-    ...voiceList.filter((voice) => allowedVoices.includes(voice.Name)),
-    ...extraVoices.map((name) => ({ Name: name })),
-  ]
+  // 候选音色去重合并：voiceList 的完整条目（含性别）优先，extraVoices 中不在列表内的以裸 ID 补充
+  const promptVoiceMap = new Map<string, { Name: string; Gender?: string }>()
+  for (const name of extraVoices) promptVoiceMap.set(name, { Name: name })
+  for (const voice of voiceList) {
+    if (allowedVoices.includes(voice.Name)) promptVoiceMap.set(voice.Name, voice)
+  }
+  const promptVoiceList = [...promptVoiceMap.values()]
   const prompt = getCharacterPlanPrompt(lang, promptVoiceList, sampleText)
   // 音色性别对照表（VoiceConfig.Gender: Male/Female），用于纠正"女角色配男声"
   const voiceGender = new Map(

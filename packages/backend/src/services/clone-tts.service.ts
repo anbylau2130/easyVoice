@@ -2,13 +2,13 @@ import fs from 'fs/promises'
 import path from 'path'
 import { Readable } from 'stream'
 import { logger } from '../utils/logger'
-import { fetcher } from '../utils/request'
+import { postToCloneService } from '../utils/clone-http'
 import { listCustomVoices } from './customVoice.service'
 
 /**
- * 声音克隆合成：对接本地克隆 TTS 服务的 OpenAI 兼容接口
- * （参考实现：xtts-api-server，POST /audio/speech，voice 传说话人参考 wav 的 URL）。
+ * 声音克隆合成：对接本地克隆 TTS 服务（参考实现：daswer123/xtts-api-server）。
  * 服务地址与参考音频访问前缀在设置页配置，落盘 data/clone-settings.json，重启自动恢复。
+ * 对克隆服务的所有请求经由 utils/clone-http 统一出口（出口处含安全终校验）。
  */
 
 const SETTINGS_FILE = path.resolve(__dirname, '../../data/clone-settings.json')
@@ -20,7 +20,7 @@ export interface CloneSettings {
   language?: string
   /** 克隆服务容器内说话人目录（挂载的 EasyVoice custom-voices） */
   speakersDir?: string
-  /** 参考音频 URL 前缀（服务端通过 URL 拉取参考音频时使用） */
+  /** 参考音频 URL 前缀（克隆服务通过该前缀 HTTP 拉取参考音频，免目录挂载） */
   wavUrlPrefix?: string
 }
 
@@ -71,11 +71,24 @@ export function isCustomVoice(voice: string): boolean {
   return voice.startsWith('custom-')
 }
 
+/** 私网/环回地址识别（与 utils/clone-http 出口校验保持一致） */
+const PRIVATE_HOST_PATTERN =
+  /^(localhost$|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|0\.0\.0\.0$|\[::1\]$|host\.docker\.internal$)/i
+
+export interface CloneTargetCheck {
+  ok: boolean
+  message?: string
+  url?: URL
+}
+
 /**
- * 克隆服务地址校验：仅 http/https；拒绝云元数据地址（169.254.169.254，SSRF 防护）。
- * localhost/内网地址允许——自部署场景下用户在本机或局域网机器运行 TTS 服务是核心用法。
+ * 克隆服务目标地址入口校验（allowlist）：
+ * 1. 仅允许 http/https 协议；
+ * 2. 始终拒绝云元数据地址（169.254.169.254，SSRF 防护）；
+ * 3. 私网/环回地址默认允许——自部署单用户场景下，克隆 TTS 服务运行在本机或局域网是核心用法；
+ *    需要严格封禁私网时设置环境变量 TTS_CLONE_STRICT=1（请求出口 utils/clone-http 同样强制执行）。
  */
-export function validateCloneBaseUrl(raw: string): { ok: boolean; message?: string; url?: URL } {
+export function validateCloneBaseUrl(raw: string): CloneTargetCheck {
   let url: URL
   try {
     url = new URL(raw)
@@ -87,6 +100,9 @@ export function validateCloneBaseUrl(raw: string): { ok: boolean; message?: stri
   }
   if (url.hostname === '169.254.169.254') {
     return { ok: false, message: '不允许的地址' }
+  }
+  if (process.env.TTS_CLONE_STRICT === '1' && PRIVATE_HOST_PATTERN.test(url.hostname)) {
+    return { ok: false, message: '严格模式下不允许访问内网地址（TTS_CLONE_STRICT=1）' }
   }
   return { ok: true, url }
 }
@@ -115,25 +131,30 @@ export async function testCloneService(
       patch.speakersDir?.trim() ||
       current.speakersDir ||
       process.env.TTS_CLONE_SPEAKERS_DIR ||
-      '/app/speakers',
+      '/app/speakers/custom-voices',
     wavUrlPrefix: patch.wavUrlPrefix?.trim() || current.wavUrlPrefix || '',
   }
 
   if (!base.baseUrl) return { ok: false, message: '请先填写克隆服务地址', latencyMs: 0 }
-  const check = validateCloneBaseUrl(base.baseUrl)
-  if (!check.ok) return { ok: false, message: check.message || '克隆服务地址无效', latencyMs: 0 }
+  // 入口校验：仅 http/https、拒绝元数据地址、私网策略；请求出口处还有二次校验
+  const target = validateCloneBaseUrl(base.baseUrl)
+  if (!target.ok || !target.url)
+    return { ok: false, message: target.message || '克隆服务地址无效', latencyMs: 0 }
 
   const voices = await listCustomVoices()
   if (!voices.length)
     return { ok: false, message: '还没有上传参考音频（自定义音色）', latencyMs: 0 }
 
+  // speaker_wav 一律使用克隆服务容器内路径（实测该服务不支持 URL 拉取参考音频）
+  const speakerWav = `${base.speakersDir.replace(/\/$/, '')}/${voices[0].file}`
+
   const start = Date.now()
   try {
-    const response = await fetcher.post(
-      `${base.baseUrl.replace(/\/$/, '')}/tts_to_audio/`,
+    const response = await postToCloneService(
+      target.url,
       {
         text: '测试。',
-        speaker_wav: `${base.speakersDir.replace(/\/$/, '')}/${voices[0].file}`,
+        speaker_wav: speakerWav,
         language: base.language,
       },
       { responseType: 'arraybuffer', timeout: 120_000 }
@@ -167,8 +188,9 @@ function rateToSpeed(rate?: string): number {
 
 /**
  * 用自定义音色合成语音。对接 daswer123/xtts-api-server 协议：
- * POST /tts_to_audio/ JSON {text, speaker_wav(容器内绝对路径), language, speed} -> wav 音频。
- * 参考音频目录已挂载到容器的 /app/speakers。
+ * POST /tts_to_audio/ JSON {text, speaker_wav, language, speed} -> wav 音频。
+ * speaker_wav 支持两种形态：参考音频的 HTTP URL（配置了 wavUrlPrefix 时，克隆服务自行拉取）
+ * 或克隆服务容器内绝对路径（speakers 目录已挂载时）。
  */
 export async function synthesizeCloneVoice(
   text: string,
@@ -185,27 +207,53 @@ export async function synthesizeCloneVoice(
   const entry = voices.find((v) => v.voice === voice)
   if (!entry) throw new Error(`未找到自定义音色：${voice}`)
 
-  // 复校已存储地址（防绕过设置页校验的手工篡改）
-  const check = validateCloneBaseUrl(settings.baseUrl)
-  if (!check.ok) throw new Error(`克隆服务地址无效：${check.message}`)
+  // 复校已存储地址（防绕过设置页校验的手工篡改）；请求出口 utils/clone-http 处还有二次校验
+  const target = validateCloneBaseUrl(settings.baseUrl)
+  if (!target.ok || !target.url) throw new Error(`克隆服务地址无效：${target.message}`)
+
+  // speaker_wav 一律使用克隆服务容器内路径（speakers 目录挂载）。
+  // 实测 daswer123/xtts-api-server 不支持 URL 拉取参考音频（会把 URL 当相对路径打开导致 500），
+  // 因此 wavUrlPrefix 仅作存储保留，不参与合成。
+  const speakerWav = `${settings.speakersDir.replace(/\/$/, '')}/${entry.file}`
 
   const body = {
     text,
-    speaker_wav: `${settings.speakersDir.replace(/\/$/, '')}/${entry.file}`,
+    speaker_wav: speakerWav,
     language: settings.language || 'zh-cn',
     speed: rateToSpeed(opts.rate),
   }
   logger.info(
-    `Clone TTS request: ${settings.baseUrl}/tts_to_audio/ (${text.length} chars, voice=${voice})`
+    `Clone TTS request: ${target.url.origin}/tts_to_audio/ (${text.length} chars, voice=${voice})`
   )
-  const response = await fetcher.post(
-    `${settings.baseUrl.replace(/\/$/, '')}/tts_to_audio/`,
-    body,
-    {
+  let response
+  try {
+    response = await postToCloneService(target.url, body, {
       responseType: opts.mode === 'stream' ? 'stream' : 'arraybuffer',
       timeout: 600_000,
+    })
+  } catch (err) {
+    // 透出克隆服务返回的具体错误（如参考音频缺失、语言不支持），避免前端只看到笼统的 500。
+    // arraybuffer 响应下 err.response.data 是 Buffer，需要先转文本再解析 JSON
+    const ax = err as { response?: { status?: number; data?: unknown }; message?: string }
+    const data = ax?.response?.data
+    let detail: string | undefined
+    if (typeof data === 'string') {
+      try {
+        detail = JSON.parse(data)?.detail
+      } catch {
+        detail = data.slice(0, 200)
+      }
+    } else if (Buffer.isBuffer(data)) {
+      try {
+        detail = JSON.parse(data.toString('utf-8'))?.detail
+      } catch {
+        detail = undefined
+      }
+    } else if (data && typeof data === 'object' && 'detail' in (data as Record<string, unknown>)) {
+      detail = String((data as Record<string, unknown>).detail)
     }
-  )
+    throw new Error(`克隆服务合成失败：${detail || ax?.message || '未知错误'}`)
+  }
   logger.info(`Clone TTS response: status=${response.status}`)
   if (opts.mode === 'stream') {
     return response.data as Readable
