@@ -224,9 +224,10 @@ const cnSurveyTemplate = (chunk: string, roster: string[]) => `
 下面是小说中的某一章内容。请列出其中出现的所有**具名人物**（有姓名或固定称呼的角色；无名路人、代词一律不算）。
 每个人物返回：
 - name：人物名字。**若该人物已在下方"已登记人物"中（含别称，如 宝玉=贾宝玉、凤姐=王熙凤），name 必须使用已登记的正式名**；只有全新人物才用新名字
+- asMentioned：**书中其他人或旁白称呼该人物时**使用的称呼（即"别人怎么叫 TA"，如宝玉被叫"二爷"则填二爷；该人物怎么称呼别人不算；没有则留空）
 - gender：female / male（按文中描述判断，确实无法判断填 unknown）
 - dialog：该人物在本章中的**对白句数**（整数，没有对白填 0）
-- brief：两三个字的身份提示（如 书生/丫鬟/铁匠）
+- brief：两三个字的身份/性格提示（如 书生/丫鬟/铁匠/温柔），**不能填人名**
 只统计本章中出现的人物。返回 JSON 格式：
 {"characters":[{"name":"张三","gender":"male","dialog":3,"brief":"书生"}]}
 ${roster.length ? `\n### 已登记人物（正式名）\n${roster.join('、')}\n` : ''}
@@ -238,6 +239,7 @@ const engSurveyTemplate = (chunk: string, roster: string[]) => `
 Below is a single chapter of a novel. List ALL named characters that appear (characters with a name or fixed title; unnamed passers-by and pronouns do not count).
 For each character return:
 - name: character name. **If this character is already in the "Known characters" list below (including aliases, e.g. Lizzy = Elizabeth Bennet), "name" MUST be the registered formal name**; only brand-new characters get new names
+- asMentioned: the appellation **others or the narrator use FOR this character** (how TA is called — e.g. if characters call Elizabeth "Lizzy", write Lizzy; what TA calls others does not count; leave empty if none)
 - gender: female / male (based on the text; use unknown if truly unclear)
 - dialog: number of dialogue lines this character speaks in this chapter (integer, 0 if none)
 - brief: 2-3 word identity hint (e.g. scholar / maid / blacksmith)
@@ -251,6 +253,36 @@ export function getCharacterSurveyPrompt(lang = 'cn', chunk: string, roster: str
   return lang === 'eng'
     ? engSurveyTemplate(chunk, roster)
     : cnSurveyTemplate(chunk, roster)
+}
+
+const cnDescribeTemplate = (table: string) => `
+【角色性格描述】
+以下是一部小说的角色名单（含全书对白句数、书中其他称呼与身份提示）。请为每个角色写一段**清晰的中文描述**，要求：
+1. 以该角色**在书中的所有称呼**开头：有其他称呼时格式如"贾宝玉（书中又称：宝玉、怡红公子）——"；没有其他称呼时直接以名字开头即可，不要写"又称"或"无"；
+2. 之后概括其性格与身份（可结合姓名常识与对白数推断）；
+3. 总长 60 字以内，必须使用中文，不得使用英文字符，不得直接把人名当描述；
+4. 逐个角色都要返回，不要遗漏。
+返回 JSON 格式：
+{"characters":[{"character":"贾宝玉","description":"贾宝玉（书中又称：宝玉、怡红公子）——衔玉而生的贵公子，性情纯真多情，厌恶仕途经济"}]}
+
+### 角色名单（character | 书中其他称呼 | 对白句数 | 身份提示）
+${table}
+`
+const engDescribeTemplate = (table: string) => `
+【Character descriptions】
+Below is a character list of a novel (with whole-book dialogue counts, other names used in the book, and identity hints). Write a **clear English description** for each character:
+1. Start with ALL names the character is known by in the book, formatted like "Elizabeth Bennet (also known as: Lizzy, Eliza) — ";
+2. Then summarize personality and role (you may infer from the name and dialogue count);
+3. Max 40 words per description.
+Return every character. Return JSON:
+{"characters":[{"character":"Elizabeth Bennet","description":"Elizabeth Bennet (also known as: Lizzy, Eliza) — witty, independent gentlewoman who prides herself on judging character"}]}
+
+### Character list (character | other names | dialogue lines | identity hint)
+${table}
+`
+
+export function getCharacterDescribePrompt(lang = 'cn', table: string) {
+  return lang === 'eng' ? engDescribeTemplate(table) : cnDescribeTemplate(table)
 }
 
 const cnAssignTemplate = (table: string, voiceList: { Name: string; Gender?: string }[]) => `

@@ -5,7 +5,12 @@ import { AUDIO_DIR } from '../../config'
 import { logger } from '../../utils/logger'
 import { asyncSleep, ensureDir, getLangConfig, readJson } from '../../utils'
 import { generateTTS, TtsProgressCallback } from '../tts.service'
-import { surveyBookCharacters, CharacterStat, CharacterVoice } from '../../llm/segmentParser'
+import {
+  surveyBookCharacters,
+  describeCharacters,
+  CharacterStat,
+  CharacterVoice,
+} from '../../llm/segmentParser'
 import { listVoicePresets } from '../voicePreset.service'
 import { listCustomVoices } from '../customVoice.service'
 import type { ParsedChapter } from './chapter.service'
@@ -617,6 +622,9 @@ export async function planBookVoices(id: string): Promise<void> {
           }
           for (const s of stats) {
             if (s.name === '旁白') continue
+            // 防御：brief 若就是人名（或互为包含）则不作为描述
+            const briefOk =
+              !!s.brief && !s.name.includes(s.brief) && !s.brief.includes(s.name)
             let entry = list.find(
               (c) =>
                 c.character === s.name ||
@@ -630,13 +638,30 @@ export async function planBookVoices(id: string): Promise<void> {
                 character: s.name,
                 voice: pickVoice(gender),
                 gender,
-                description: s.brief,
+                description: briefOk ? s.brief : undefined,
                 dialog: 0,
+                aliases: [],
               }
               list.push(entry)
               logger.info(`New character discovered: ${s.name} -> ${entry.voice}`)
-            } else if (!entry.description && s.brief) {
-              entry.description = s.brief
+            } else {
+              // 同一角色的不同称呼：并入已有条目；更长的名字视为更正式，升级为正名
+              if (s.name !== entry.character) {
+                entry.aliases = [...new Set([...(entry.aliases || []), s.name])]
+                if (s.name.length > entry.character.length) {
+                  const old = entry.character
+                  entry.character = s.name
+                  entry.aliases = [...new Set([...(entry.aliases || []), old])]
+                  logger.info(`Canonical name upgraded: ${old} -> ${s.name}`)
+                }
+              }
+              // 本章实际使用的称呼也计入别名（如正名"凤姐"、本章称"王熙凤"）
+              if (s.mentioned && s.mentioned !== entry.character) {
+                entry.aliases = [...new Set([...(entry.aliases || []), s.mentioned])]
+              }
+              if (!entry.description && briefOk && s.brief) {
+                entry.description = s.brief
+              }
             }
             entry.dialog = (entry.dialog || 0) + s.dialog
           }
@@ -673,6 +698,37 @@ export async function planBookVoices(id: string): Promise<void> {
             b.message = '规划已手动停止，已收录的角色已保留，可继续编辑音色或重新规划'
           })
           return
+        }
+        // 通读完成：为全部角色生成性格描述（一次调用；失败回落使用普查身份提示）
+        await update((b) => {
+          b.planningDetail = '正在生成角色性格描述…'
+        })
+        try {
+          const current = await loadBook(id)
+          const rows = current?.characterVoices || []
+          if (rows.length) {
+            const briefs = new Map(rows.map((c) => [c.character, c.description] as const))
+            const enriched = await describeCharacters({
+              lang,
+              characters: rows.map((c) => ({
+                name: c.character,
+                dialog: c.dialog,
+                brief: c.description?.slice(0, 12),
+                aliases: c.aliases,
+              })),
+            })
+            await update((b) => {
+              for (const row of b.characterVoices || []) {
+                const d = enriched.get(row.character)
+                // 仅覆盖"普查提示"级别的描述；用户手动写过的描述保持不变
+                if (d && (!row.description || row.description === briefs.get(row.character))) {
+                  row.description = d
+                }
+              }
+            })
+          }
+        } catch (e) {
+          logger.warn(`Character description enrichment skipped: ${(e as Error).message}`)
         }
         await update((b) => {
           b.planningDetail = `全书通读完成，共收录 ${discovered} 个角色音色（可在角色表中继续调整）`

@@ -53,6 +53,8 @@ export interface CharacterVoice {
   description?: string
   /** 全书对白句数（权重：列表排序依据） */
   dialog?: number
+  /** 该角色在书中的其他称呼（与 character 指同一人） */
+  aliases?: string[]
 }
 
 export interface BookDetail {

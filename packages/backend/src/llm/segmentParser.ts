@@ -3,6 +3,7 @@ import { asyncSleep, safeRunWithRetry } from '../utils'
 import { openai } from '../utils/openai'
 import {
   getCharacterAssignPrompt,
+  getCharacterDescribePrompt,
   getCharacterPlanPrompt,
   getCharacterSegmentPrompt,
   getCharacterSurveyPrompt,
@@ -38,6 +39,8 @@ export interface CharacterVoice {
   description?: string
   /** 全书对白句数（权重：排序与取舍依据） */
   dialog?: number
+  /** 该角色在书中的其他称呼（与 character 指同一人） */
+  aliases?: string[]
 }
 
 const SEGMENT_ARRAY_KEYS = ['segments', 'result', 'data', 'list']
@@ -297,6 +300,8 @@ export interface CharacterStat {
   /** 全书对白句数（各块累加） */
   dialog: number
   brief?: string
+  /** 本章中该人物实际使用的称呼（收集进 aliases） */
+  mentioned?: string
 }
 
 /** 逐章成块；单章超过 chunkSize 时硬切成多个部分（进度仍按该章显示） */
@@ -383,18 +388,22 @@ export async function surveyBookCharacters({
       }
       onProgress?.(`正在通读 ${chunk.label}`)
       const rosterNames = getRosterNames ? await getRosterNames() : []
-      // 单章抽取：先用快速模式（GLM 关思考）；若整章抽不出任何人物，
-      // 说明快速模式失效或该章较复杂，自动改用深度模式（开启思考）重跑一次
-      const extractChunk = async (thinking: boolean) =>
-        await safeRunWithRetry(
-          async () => {
+      // 单章抽取两级策略：
+      // 1) 快速模式（GLM 关思考）——速度快，但遇到人物密集/长章节可能抽不出人物；
+      // 2) 抽空立即升级深度模式（开启思考）重跑。
+      // 空结果不做同模式原地重试（重试也是空）；仅传输类错误（429/超时/5xx）退避重试
+      const extractChunk = async (thinking: boolean) => {
+        let lastErr: Error | undefined
+        const attempts = thinking ? 2 : 3
+        for (let attempt = 1; attempt <= attempts; attempt++) {
+          try {
             const response = await openai.createChatCompletion({
               messages: [
                 { role: 'system', content: 'You are a helpful assistant. And you can return valid json object' },
                 { role: 'user', content: getCharacterSurveyPrompt(lang, chunk.text, rosterNames) },
               ],
               temperature: 0.2,
-              max_tokens: 2000,
+              max_tokens: 3000,
               ...(thinking ? {} : openai.fastExtractFields(openai.getModel())),
               response_format: { type: 'json_object' },
             })
@@ -410,29 +419,40 @@ export async function surveyBookCharacters({
               const gender =
                 item.gender === 'female' ? 'female' : item.gender === 'male' ? 'male' : 'unknown'
               const dialog = Number.isFinite(Number(item.dialog)) ? Math.max(0, Number(item.dialog)) : 0
-              stats.push({
-                name,
-                gender,
-                dialog,
-                brief: typeof item.brief === 'string' ? item.brief.slice(0, 12) : undefined,
-              })
+            stats.push({
+              name,
+              gender,
+              dialog,
+              brief: typeof item.brief === 'string' ? item.brief.slice(0, 12) : undefined,
+              mentioned:
+                typeof item.asMentioned === 'string' ? item.asMentioned.trim().slice(0, 20) : undefined,
+            })
             }
+            if (!stats.length) throw new Error('survey returned no valid entries')
             return stats
-          },
-          {
-            retries: 3,
-            baseDelayMs: 5000,
-            onError: (err, attempt) => {
-              logger.warn(
-                `Character survey chunk ${idx + 1} attempt ${attempt}: ${(err as Error).message}`
-              )
-              // 重试也同步到进度行，让前端能看到"卡住"的原因（限速退避/超时重试）
+          } catch (err) {
+            lastErr = err as Error
+            const message = lastErr.message
+            const empty = message.includes('no entries') || message.includes('no valid entries')
+            const rateLimited = message.includes('429')
+            logger.warn(
+              `Character survey chunk ${idx + 1} attempt ${attempt} (${thinking ? '深度' : '快速'}): ${message}`
+            )
+            if (empty) {
+              // 空结果重试同模式没有意义，立即交由外层升级深度模式
+              break
+            }
+            if (attempt < attempts) {
+              const delay = rateLimited ? Math.min(45_000, 15_000 * attempt) : 5_000 * attempt
               onProgress?.(
-                `（${chunk.label}）第 ${attempt} 次尝试失败（${(err as Error).message.slice(0, 60)}），稍后自动重试…`
+                `（${chunk.label}）第 ${attempt} 次尝试失败（${message.slice(0, 60)}），${Math.round(delay / 1000)} 秒后自动重试…`
               )
-            },
+              await asyncSleep(delay)
+            }
           }
-        )
+        }
+        return []
+      }
       let stats = await extractChunk(false)
       if (!stats.length) {
         logger.info(`Chunk ${idx + 1} empty in fast mode, retrying with thinking enabled`)
@@ -502,6 +522,70 @@ export async function surveyBookCharacters({
     `Character survey done: ${result.length} unique characters from ${successChunks}/${chunks.length} chunks`
   )
   return result.sort((a, b) => b.dialog - a.dialog)
+}
+
+/**
+ * 通读完成后，为全部角色生成一句中文性格/身份描述（替代普查阶段的简短提示）。
+ * 失败时返回空映射，上层回落使用普查身份提示，不影响规划结果。
+ */
+export async function describeCharacters({
+  lang = 'zh',
+  characters,
+  retries = 2,
+}: {
+  lang?: string
+  characters: {
+    name: string
+    dialog?: number
+    brief?: string
+    aliases?: string[]
+  }[]
+  retries?: number
+}): Promise<Map<string, string>> {
+  const table = characters
+    .map((c) => {
+      const aliasText = c.aliases?.length ? ` | 书中其他称呼: ${c.aliases.join('、')}` : ''
+      return `${c.name}${aliasText} | 对白${c.dialog || 0}句${c.brief ? ` | ${c.brief}` : ''}`
+    })
+    .join('\n')
+  const out = new Map<string, string>()
+  try {
+    return await safeRunWithRetry(
+      async () => {
+        const response = await openai.createChatCompletion({
+          messages: [
+            { role: 'system', content: 'You are a helpful assistant. And you can return valid json object' },
+            { role: 'user', content: getCharacterDescribePrompt(lang, table) },
+          ],
+          temperature: 0.3,
+          max_tokens: 3000,
+          ...openai.fastExtractFields(openai.getModel()),
+          response_format: { type: 'json_object' },
+        })
+        const content = response.choices[0]?.message?.content
+        if (!content) throw new Error('LLM returned empty content')
+        const parsed = JSON.parse(content)
+        const arr = extractSegmentArray(parsed)
+        if (!arr?.length) throw new Error('describe returned no entries')
+        for (const item of arr) {
+          const name =
+            typeof item.character === 'string'
+              ? item.character.trim()
+              : typeof item.name === 'string'
+              ? item.name.trim()
+              : ''
+          const desc = typeof item.description === 'string' ? item.description.trim() : ''
+          if (name && desc) out.set(name, desc.slice(0, 100))
+        }
+        if (!out.size) throw new Error('describe returned no valid entries')
+        return out
+      },
+      { retries, baseDelayMs: 3000 }
+    )
+  } catch (err) {
+    logger.warn(`Character description enrichment failed: ${(err as Error).message}`)
+    return out
+  }
 }
 
 /**
