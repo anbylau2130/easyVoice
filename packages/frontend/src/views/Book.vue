@@ -42,7 +42,19 @@
           <el-button type="primary" :loading="savingLlm" @click="handleSaveLlmSettings">
             保存配置
           </el-button>
+          <el-button :loading="llmTesting" @click="handleTestLlm">测试连接</el-button>
         </div>
+        <el-alert
+          v-if="llmTestResult"
+          :type="llmTestResult.ok ? 'success' : 'error'"
+          :title="llmTestResult.message"
+          :description="
+            llmTestResult.latencyMs ? `耗时 ${Math.round(llmTestResult.latencyMs / 100) / 10} 秒` : ''
+          "
+          :closable="false"
+          class="failed-alert"
+          show-icon
+        />
       </template>
     </section>
 
@@ -228,7 +240,9 @@
         </el-table-column>
         <el-table-column label="状态" width="120">
           <template #default="{ row }">
-            <el-tag :type="bookStatusType(row.status)">{{ bookStatusText(row.status) }}</el-tag>
+            <el-tag :type="row.planning ? 'warning' : bookStatusType(row.status)">
+              {{ row.planning ? '规划中' : bookStatusText(row.status) }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="失败" width="80">
@@ -416,7 +430,13 @@
       />
       <div v-if="bookDetail?.planning" class="current-line">
         <LoaderCircle class="spin-icon" :size="16" />
-        <span>AI 正在通读全书，按角色性格规划音色…（约 1-3 分钟，期间尚无片段进度属正常）</span>
+        <span>
+          {{ bookDetail.planningDetail || 'AI 正在通读全书，按角色性格规划音色…' }}
+          {{ planningElapsedText }}
+        </span>
+        <el-button size="small" :loading="stoppingPlan" @click="handleStopPlan">
+          停止规划
+        </el-button>
       </div>
       <div
         v-else-if="bookDetail?.status === 'running' && !currentProcessing"
@@ -659,9 +679,11 @@ import { getVoiceList, type Voice } from '@/api/tts'
 import {
   getLlmSettings,
   saveLlmSettings,
+  testLlmSettings,
   getCloneSettings,
   saveCloneSettings,
   testCloneSettings,
+  type LlmTestResult,
 } from '@/api/settings'
 import {
   deleteCustomVoice,
@@ -688,6 +710,7 @@ import {
   parseBook,
   pauseBook,
   planVoices,
+  stopPlanVoices,
   resumeBook,
   retryFailedChapters,
   saveCharacterVoices,
@@ -729,6 +752,8 @@ const chapterPageSize = 100
 const bookId = ref<string | null>(null)
 const bookDetail = ref<BookDetail | null>(null)
 let pollTimer: ReturnType<typeof setInterval> | null = null
+// 记住最后打开的书：刷新页面后自动恢复详情视图，规划/生成进度不丢
+const LAST_BOOK_KEY = 'easyvoice:lastBookId'
 // 秒级时钟：驱动"已用时 / 最近活动"的相对时间展示
 const nowTick = ref(Date.now())
 let tickTimer: ReturnType<typeof setInterval> | null = null
@@ -744,6 +769,19 @@ const savingLlm = ref(false)
 
 // 角色音色规划/编辑/试听
 const planningLoading = ref(false)
+const stoppingPlan = ref(false)
+async function handleStopPlan() {
+  if (!bookId.value) return
+  stoppingPlan.value = true
+  try {
+    await stopPlanVoices(bookId.value)
+    ElMessage.success('正在停止规划，当前章节读完即生效')
+  } catch (error) {
+    ElMessage.error((error as Error).message || '停止失败')
+  } finally {
+    stoppingPlan.value = false
+  }
+}
 const editingVoices = ref<CharacterVoice[]>([])
 const voicesDirty = ref(false)
 const savingVoices = ref(false)
@@ -1040,6 +1078,17 @@ const voiceOptions = computed(() => {
 const hasCharacterVoices = computed(() => !!bookDetail.value?.characterVoices?.length)
 
 // AI 三步流程当前所处的步骤（0 规划 / 1 确认 / 2 生成）
+// 规划已用时：每秒随 nowTick 刷新，让长时间单段分析期间页面也有"活着"的反馈
+const planningElapsedText = computed(() => {
+  if (!bookDetail.value?.planning || !bookDetail.value?.planningStartedAt) return ''
+  const secs = Math.max(
+    0,
+    Math.floor((nowTick.value - new Date(bookDetail.value.planningStartedAt).getTime()) / 1000)
+  )
+  const m = Math.floor(secs / 60)
+  return `（已用时 ${m} 分 ${String(secs % 60).padStart(2, '0')} 秒）`
+})
+
 const aiStep = computed(() => {
   if (!bookDetail.value) return 0
   if (bookDetail.value.status === 'completed') return 3
@@ -1184,6 +1233,7 @@ async function handleDeleteBook(id: string, title: string) {
   try {
     await deleteBook(id)
     ElMessage.success('有声书已删除')
+    if (localStorage.getItem(LAST_BOOK_KEY) === id) localStorage.removeItem(LAST_BOOK_KEY)
     // 删除的是当前打开的书时，退回新建视图
     if (bookId.value === id) backToUpload()
     await refreshBooks()
@@ -1431,6 +1481,8 @@ async function openBook(id: string) {
   try {
     bookDetail.value = await getBook(id)
     bookId.value = id
+    // 记住最后打开的书：页面刷新后自动恢复到详情视图，规划/生成进度不丢
+    localStorage.setItem(LAST_BOOK_KEY, id)
     startPolling()
   } catch (error) {
     ElMessage.error((error as Error).message || '打开有声书失败')
@@ -1441,6 +1493,8 @@ function backToUpload() {
   stopPolling()
   bookId.value = null
   bookDetail.value = null
+  // 主动返回列表视为退出详情视图，刷新后不再强制恢复
+  localStorage.removeItem(LAST_BOOK_KEY)
   refreshBooks()
 }
 
@@ -1537,6 +1591,25 @@ async function handleSaveLlmSettings() {
   }
 }
 
+// LLM 连通性测试：用表单当前值发起最小真实调用（Key 留空则用已保存/环境变量里的密钥）
+const llmTesting = ref(false)
+const llmTestResult = ref<LlmTestResult | null>(null)
+async function handleTestLlm() {
+  llmTesting.value = true
+  llmTestResult.value = null
+  try {
+    const payload: Record<string, string> = {}
+    if (llmForm.value.baseUrl.trim()) payload.baseUrl = llmForm.value.baseUrl.trim()
+    if (llmForm.value.model.trim()) payload.model = llmForm.value.model.trim()
+    if (llmForm.value.apiKey.trim()) payload.apiKey = llmForm.value.apiKey.trim()
+    llmTestResult.value = await testLlmSettings(payload)
+  } catch (error) {
+    ElMessage.error((error as Error).message || '测试失败')
+  } finally {
+    llmTesting.value = false
+  }
+}
+
 onMounted(async () => {
   loadVoiceList()
   refreshBooks()
@@ -1545,6 +1618,25 @@ onMounted(async () => {
   loadVoicePresets()
   loadCloneSettings()
   tickTimer = setInterval(() => (nowTick.value = Date.now()), 1000)
+  // 恢复进度视图：优先回到最后打开的书；没有记录时若有书正在规划/生成，自动打开它
+  // （规划在服务端进行，刷新页面不会中断，恢复后轮询继续展示 planningDetail 进度）
+  await refreshBooks()
+  const lastId = localStorage.getItem(LAST_BOOK_KEY)
+  const targetId =
+    lastId ||
+    books.value.find((b) => b.planning || b.status === 'running')?.id ||
+    ''
+  if (targetId) {
+    try {
+      bookDetail.value = await getBook(targetId)
+      bookId.value = targetId
+      localStorage.setItem(LAST_BOOK_KEY, targetId)
+      startPolling()
+    } catch {
+      // 书已被删除或 ID 失效，清除记录回到新建视图
+      localStorage.removeItem(LAST_BOOK_KEY)
+    }
+  }
 })
 onBeforeUnmount(() => {
   stopPolling()

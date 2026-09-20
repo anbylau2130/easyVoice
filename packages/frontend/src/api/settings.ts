@@ -47,6 +47,23 @@ export const saveLlmSettings = async (payload: LlmSettingsPayload): Promise<LlmS
   return response.data.data
 }
 
+export interface LlmTestResult {
+  ok: boolean
+  message: string
+  latencyMs: number
+}
+
+/** LLM 连通性测试：用表单当前值发起最小真实调用（缺省项由后端回落已保存配置/.env） */
+export const testLlmSettings = async (
+  payload: Partial<LlmSettingsPayload>
+): Promise<LlmTestResult> => {
+  const response = await api.post<{ success: boolean; code: number; data: LlmTestResult }>(
+    '/llm/test',
+    payload ?? {}
+  )
+  return response.data.data
+}
+
 export interface CloneSettings {
   baseUrl: string
   language: string

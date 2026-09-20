@@ -1,9 +1,11 @@
 import { logger } from '../utils/logger'
-import { safeRunWithRetry } from '../utils'
+import { asyncSleep, safeRunWithRetry } from '../utils'
 import { openai } from '../utils/openai'
 import {
+  getCharacterAssignPrompt,
   getCharacterPlanPrompt,
   getCharacterSegmentPrompt,
+  getCharacterSurveyPrompt,
   getPrompt,
 } from './prompt/generateSegment'
 
@@ -285,6 +287,338 @@ export async function fetchLlmSegments({
 /** 规划 prompt 的标记，mock 测试服务器据此返回角色列表 */
 export const CHARACTER_PLAN_MARKER = '【角色音色规划】'
 
+// ===== 全书通读规划：人物普查（分块并发）→ 汇总统计 → 音色分配 =====
+
+export interface CharacterStat {
+  name: string
+  gender: 'female' | 'male' | 'unknown'
+  /** 全书对白句数（各块累加） */
+  dialog: number
+  brief?: string
+}
+
+/** 逐章成块；单章超过 chunkSize 时硬切成多个部分（进度仍按该章显示） */
+function buildChunks(
+  items: { content: string; label: string }[],
+  chunkSize: number
+): { text: string; label: string }[] {
+  const chunks: { text: string; label: string }[] = []
+  for (const item of items) {
+    const text = (item.content || '').trim()
+    if (!text) continue
+    if (text.length <= chunkSize) {
+      chunks.push({ text, label: item.label })
+      continue
+    }
+    const parts = Math.ceil(text.length / chunkSize)
+    for (let i = 0; i < parts; i++) {
+      chunks.push({
+        text: text.slice(i * chunkSize, (i + 1) * chunkSize),
+        label: `${item.label}（第 ${i + 1}/${parts} 部分）`,
+      })
+    }
+  }
+  return chunks
+}
+
+async function mapPool<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let next = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++
+      results[i] = await fn(items[i], i)
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
+
+/**
+ * 阶段一（通读）：逐章提取人物统计，跨章合并去重（对白句数累加、性别投票）。
+ * 每章一次调用——进度按章推进，前端实时可见；章与章之间串行并留间隔，
+ * 避免触发 LLM 服务限速；单章失败只跳过该章并告警。
+ * onProgress 在每章开始时回调进度描述（如"正在通读 第 12/60 章"）。
+ */
+export async function surveyBookCharacters({
+  texts,
+  lang = 'zh',
+  // 单章超过此长度时内部硬切成多个部分（进度仍按该章显示）
+  chunkSize = 30000,
+  concurrency = 1,
+  onProgress,
+  shouldStop,
+}: {
+  /** 章节正文列表，label 为章节显示名（如"第 12/60 章"） */
+  texts: { content: string; label: string }[]
+  lang?: string
+  chunkSize?: number
+  concurrency?: number
+  onProgress?: (label: string) => void
+  /** 返回 true 时在下一章边界停止通读（当前章会读完），返回已收集的部分统计 */
+  shouldStop?: () => boolean
+}): Promise<CharacterStat[]> {
+  const chunks = buildChunks(texts, chunkSize)
+  if (!chunks.length) throw new Error('全书正文为空，无法进行人物普查')
+  logger.info(`Character survey: ${chunks.length} chunk(s), ${concurrency} concurrent`)
+
+  const chunkResults = await mapPool(chunks, concurrency, async (chunk, idx) => {
+    try {
+      // 停止请求：下一章边界生效（当前章会读完）
+      if (shouldStop?.()) {
+        onProgress?.('收到停止请求，正在结束通读…')
+        return [] as CharacterStat[]
+      }
+      onProgress?.(`正在通读 ${chunk.label}`)
+      const stats = await safeRunWithRetry(
+        async () => {
+          const response = await openai.createChatCompletion({
+            messages: [
+              { role: 'system', content: 'You are a helpful assistant. And you can return valid json object' },
+              { role: 'user', content: getCharacterSurveyPrompt(lang, chunk.text) },
+            ],
+            temperature: 0.2,
+            response_format: { type: 'json_object' },
+          })
+          const content = response.choices[0]?.message?.content
+          if (!content) throw new Error('LLM returned empty content')
+          const parsed = JSON.parse(content)
+          const arr = extractSegmentArray(parsed)
+          if (!arr?.length) throw new Error('survey returned no entries')
+          const stats: CharacterStat[] = []
+          for (const item of arr) {
+            const name = typeof item.name === 'string' ? item.name.trim() : ''
+            if (!name || name.length > 20) continue
+            const gender =
+              item.gender === 'female' ? 'female' : item.gender === 'male' ? 'male' : 'unknown'
+            const dialog = Number.isFinite(Number(item.dialog)) ? Math.max(0, Number(item.dialog)) : 0
+            stats.push({
+              name,
+              gender,
+              dialog,
+              brief: typeof item.brief === 'string' ? item.brief.slice(0, 12) : undefined,
+            })
+          }
+          return stats
+        },
+        {
+          retries: 3,
+          baseDelayMs: 5000,
+          onError: (err, attempt) => {
+            logger.warn(
+              `Character survey chunk ${idx + 1} attempt ${attempt}: ${(err as Error).message}`
+            )
+            // 重试也同步到进度行，让前端能看到"卡住"的原因（限速退避/超时重试）
+            onProgress?.(
+              `（${chunk.label}）第 ${attempt} 次尝试失败（${(err as Error).message.slice(0, 60)}），稍后自动重试…`
+            )
+          },
+        }
+      )
+      // 块间留出间隔，降低触发服务端限速的概率
+      await asyncSleep(2000)
+      return stats
+    } catch (err) {
+      logger.warn(`Character survey chunk ${idx + 1} skipped: ${(err as Error).message}`)
+      return [] as CharacterStat[]
+    }
+  })
+
+  // 跨块合并：对白累加，性别投票（unknown 不计票）
+  const merged = new Map<string, CharacterStat & { _f: number; _m: number }>()
+  let successChunks = 0
+  for (const stats of chunkResults) {
+    if (!stats.length) continue
+    successChunks++
+    for (const s of stats) {
+      const prev = merged.get(s.name)
+      if (!prev) {
+        merged.set(s.name, {
+          name: s.name,
+          gender: s.gender,
+          dialog: s.dialog,
+          brief: s.brief,
+          _f: s.gender === 'female' ? 1 : 0,
+          _m: s.gender === 'male' ? 1 : 0,
+        })
+        continue
+      }
+      prev.dialog += s.dialog
+      if (s.gender === 'female') prev._f++
+      if (s.gender === 'male') prev._m++
+      if (!prev.brief && s.brief) prev.brief = s.brief
+    }
+  }
+  if (!successChunks) throw new Error('人物普查全部失败，请检查 AI 模型配置或稍后重试')
+  // 称呼归并（确定性）：短称呼是长称呼的子串时（如 宝玉 ⊂ 贾宝玉、袭人 ⊂ 花袭人），
+  // 统计合并进长称呼，避免同一角色被拆成多行。要求短称呼至少 2 字，防止单字误并
+  const allNames = [...merged.keys()]
+  for (const short of allNames) {
+    if (short.length < 2) continue
+    const long = allNames.find(
+      (n) => n !== short && merged.has(n) && n.length > short.length && n.includes(short)
+    )
+    if (!long) continue
+    const s = merged.get(short)!
+    const t = merged.get(long)!
+    t.dialog += s.dialog
+    t._f += s._f
+    t._m += s._m
+    if (!t.brief && s.brief) t.brief = s.brief
+    merged.delete(short)
+    logger.info(`Merged alias "${short}" into "${long}" (survey)`)
+  }
+  const result: CharacterStat[] = [...merged.values()].map(({ _f, _m, ...s }) => ({
+    ...s,
+    gender: _f >= _m && _f > 0 ? 'female' : _m > 0 ? 'male' : 'unknown',
+  }))
+  logger.info(
+    `Character survey done: ${result.length} unique characters from ${successChunks}/${chunks.length} chunks`
+  )
+  return result.sort((a, b) => b.dialog - a.dialog)
+}
+
+/**
+ * 阶段二（确定）：取对白数最多的前 topN 名角色，为其分配音色。
+ * 校验与 planCharacterVoices 一致：合法音色、性别错配纠正、中文描述、旁白兜底。
+ */
+export async function planCharactersFromSurvey({
+  lang,
+  voiceList,
+  stats,
+  topN = 30,
+  extraVoices = [],
+  narratorVoice,
+  retries = 4,
+}: {
+  lang: string
+  voiceList: VoiceConfig[]
+  stats: CharacterStat[]
+  topN?: number
+  extraVoices?: string[]
+  narratorVoice?: string
+  retries?: number
+}): Promise<CharacterVoice[]> {
+  const langFiltered = voiceList
+    .filter((voice) => voice.Name.startsWith(lang === 'eng' ? 'en' : 'zh-CN'))
+    .map((voice) => voice.Name)
+  const allowedVoices = [...langFiltered, ...extraVoices]
+  // 候选音色去重合并：voiceList 的完整条目（含性别）优先，extraVoices 中不在列表内的以裸 ID 补充
+  const promptVoiceMap = new Map<string, { Name: string; Gender?: string }>()
+  for (const name of extraVoices) promptVoiceMap.set(name, { Name: name })
+  for (const voice of voiceList) {
+    if (allowedVoices.includes(voice.Name)) promptVoiceMap.set(voice.Name, voice)
+  }
+  const table = stats
+    .filter((s) => s.name !== '旁白')
+    .slice(0, topN)
+    .map((s) => `${s.name} | ${s.gender} | 对白${s.dialog}句${s.brief ? ` | ${s.brief}` : ''}`)
+    .join('\n')
+  const prompt = getCharacterAssignPrompt(lang, [...promptVoiceMap.values()], table)
+  const voiceGender = new Map(
+    voiceList.map((voice) => [voice.Name, voice.Gender?.toLowerCase()] as const)
+  )
+
+  const normalizeGender = (value: unknown): 'female' | 'male' | undefined => {
+    if (typeof value !== 'string') return undefined
+    const v = value.trim().toLowerCase()
+    if (/^(f|female|女)/.test(v)) return 'female'
+    if (/^(m|male|男)/.test(v)) return 'male'
+    return undefined
+  }
+
+  return safeRunWithRetry(
+    async () => {
+      const response = await openai.createChatCompletion({
+        messages: [
+          { role: 'system', content: 'You are a helpful assistant. And you can return valid json object' },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+      })
+      const content = response.choices[0]?.message?.content
+      if (!content) throw new Error('LLM returned empty content')
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(content)
+      } catch {
+        throw new Error('LLM returned invalid JSON (character assignment)')
+      }
+      const raw = extractSegmentArray(parsed)
+      if (!raw?.length) throw new Error('LLM character assignment returned no entries')
+      const seen = new Map<string, CharacterVoice>()
+      for (const item of raw) {
+        const character =
+          typeof item.character === 'string'
+            ? item.character.trim()
+            : typeof item.name === 'string'
+            ? item.name.trim()
+            : ''
+        if (!character || seen.has(character)) continue
+        let voice = allowedVoices.includes(item.voice as string)
+          ? (item.voice as string)
+          : allowedVoices[0]
+        const gender = normalizeGender(item.gender)
+        // 性别错配纠正：女性角色配了男声（或反之）时，换成分配性别一致的首个音色
+        if (gender) {
+          const voiceIsMale = voiceGender.get(voice) === 'male'
+          const voiceIsFemale = voiceGender.get(voice) === 'female'
+          if ((gender === 'female' && voiceIsMale) || (gender === 'male' && voiceIsFemale)) {
+            const fixed =
+              allowedVoices.find(
+                (name) =>
+                  (gender === 'female' && voiceGender.get(name) === 'female') ||
+                  (gender === 'male' && voiceGender.get(name) === 'male')
+              ) || voice
+            logger.warn(
+              `Character "${character}" gender=${gender} mismatched voice ${voice}, switched to ${fixed}`
+            )
+            voice = fixed
+          }
+        }
+        let description =
+          typeof item.description === 'string' ? item.description.slice(0, 100).trim() : undefined
+        if (description && lang !== 'eng' && !/[\u4e00-\u9fff]/.test(description)) {
+          logger.warn(`Character "${character}" description is not Chinese, dropping it`)
+          description = undefined
+        }
+        seen.set(character, { character, voice, gender, description })
+      }
+      if (seen.size < 1) throw new Error('LLM character assignment returned no valid characters')
+      // 称呼归并兜底：角色名互为包含时（如"宝玉"⊂"贾宝玉"）合并短入长，保证同一角色单一音色
+      for (const [name] of [...seen]) {
+        if (name.length < 2 || !seen.has(name)) continue
+        const long = [...seen.keys()].find(
+          (n) => n !== name && seen.has(n) && n.length > name.length && n.includes(name)
+        )
+        if (long) {
+          seen.delete(name)
+          logger.info(`Merged duplicate character "${name}" into "${long}" (assignment)`)
+        }
+      }
+      const narrator =
+        narratorVoice && allowedVoices.includes(narratorVoice) ? narratorVoice : allowedVoices[0]
+      if (!seen.has('旁白')) {
+        seen.set('旁白', { character: '旁白', voice: narrator })
+      } else if (narratorVoice && allowedVoices.includes(narratorVoice)) {
+        seen.get('旁白')!.voice = narratorVoice
+      }
+      return [...seen.values()]
+    },
+    {
+      retries,
+      baseDelayMs: 5000,
+      onError: (err: unknown, attempt) =>
+        logger.warn(`Character assignment attempt ${attempt} failed: ${(err as Error).message}`),
+    }
+  )
+}
+
 /**
  * 第一阶段：通读书籍样本，规划"角色 -> 音色"映射（按性格选声，全书唯一）。
  * 校验：voice 必须在声音列表内；保证存在"旁白"角色。
@@ -293,7 +627,7 @@ export async function planCharacterVoices({
   lang,
   voiceList,
   sampleText,
-  retries = 2,
+  retries = 4,
   extraVoices = [],
   narratorVoice,
 }: {
@@ -419,7 +753,7 @@ export async function planCharacterVoices({
     },
     {
       retries,
-      baseDelayMs: 1000,
+      baseDelayMs: 5000,
       onError: (err: unknown, attempt) =>
         logger.warn(`Character planning attempt ${attempt} failed: ${(err as Error).message}`),
     }

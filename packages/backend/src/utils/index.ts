@@ -63,13 +63,30 @@ export async function safeRunWithRetry<T>(
     } catch (err) {
       onError(err, attempt + 1)
       if (attempt < retries - 1) {
-        await asyncSleep(baseDelayMs * (attempt + 1))
+        // 限速(429)需要远长于普通错误的等待：15s 起步线性递增、上限 45s，
+        // 给服务端配额窗口恢复时间；其他错误维持原有短退避
+        const rateLimited = isRateLimitError(err)
+        const delay = rateLimited
+          ? Math.min(45_000, 15_000 * (attempt + 1))
+          : baseDelayMs * (attempt + 1)
+        if (rateLimited) {
+          console.warn(`Rate limited (429), retrying in ${Math.round(delay / 1000)}s...`)
+        }
+        await asyncSleep(delay)
       } else {
         throw err
       }
     }
   }
   throw new Error('Unexpected execution flow') // 理论上不会到达这里
+}
+
+// LLM 服务限速识别：axios 的 429 状态码，或包装后错误信息中携带 429
+function isRateLimitError(err: unknown): boolean {
+  const status = (err as { response?: { status?: number } })?.response?.status
+  if (status === 429) return true
+  const message = err instanceof Error ? err.message : String(err)
+  return message.includes('429')
 }
 
 // 默认错误处理器

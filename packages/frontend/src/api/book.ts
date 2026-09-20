@@ -71,6 +71,10 @@ export interface BookDetail {
   characterVoices?: CharacterVoice[]
   /** AI 模式：正在规划角色音色 */
   planning?: boolean
+  /** AI 模式：规划进度描述（如"正在通读第 12/60 章"） */
+  planningDetail?: string
+  /** AI 模式：本轮规划开始时间（前端据此显示已用时） */
+  planningStartedAt?: string
   /** 书级别提示信息（如规划失败原因） */
   message?: string
 }
@@ -82,6 +86,8 @@ export interface BookSummary {
   total: number
   done: number
   failed: number
+  /** 该书是否正在规划角色音色 */
+  planning?: boolean
   /** 书的输出目录（绝对路径） */
   dir: string
   createdAt: string
@@ -196,6 +202,17 @@ export const planVoices = async (id: string) => {
   )
   if (response.data?.code !== 200) {
     throw new Error(response.data?.message || '规划失败')
+  }
+  return response.data?.message
+}
+
+/** 停止规划：当前章节读完即生效 */
+export const stopPlanVoices = async (id: string) => {
+  const response = await api.post<{ success: boolean; code: number; message?: string }>(
+    `/${id}/planVoices/stop`
+  )
+  if (response.data?.code !== 200) {
+    throw new Error(response.data?.message || '停止失败')
   }
   return response.data?.message
 }

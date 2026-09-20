@@ -12,6 +12,7 @@ import {
   chapterAudioHandler,
   chapterSrtHandler,
   planVoicesHandler,
+  stopPlanVoicesHandler,
   saveCharacterVoicesHandler,
   previewCharacterHandler,
 } from '../controllers/book.controller'
@@ -22,6 +23,7 @@ router.get('/list', listBooksHandler)
 router.post('/parseBook', parseBookHandler)
 router.post('/create', createBookHandler)
 router.post('/:id/planVoices', planVoicesHandler)
+router.post('/:id/planVoices/stop', stopPlanVoicesHandler)
 router.post('/:id/characterVoices', saveCharacterVoicesHandler)
 router.get('/:id/character/preview', previewCharacterHandler)
 router.post('/:id/selection', updateSelectionHandler)

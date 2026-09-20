@@ -119,7 +119,7 @@ ${JSON.stringify(voiceList, null, 2)}
   ]
 }
 
-### 小说片段（可能只截取了开头部分，请基于其中出现的角色规划）
+### 小说片段（从全书各章节选拼接而成，请基于其中出现的角色规划）
 ${sample}
 `
 const engPlanTemplate = (voiceList: { Name: string; Gender?: string }[], sample: string) => `
@@ -144,7 +144,7 @@ ${JSON.stringify(voiceList, null, 2)}
   ]
 }
 
-### Novel excerpt
+### Novel excerpts (sampled across all chapters)
 ${sample}
 `
 
@@ -215,4 +215,99 @@ export function getCharacterSegmentPrompt(lang = 'cn', mappingLines: string, tex
   return lang === 'eng'
     ? engCharacterSegmentTemplate(mappingLines, text)
     : cnCharacterSegmentTemplate(mappingLines, text)
+}
+
+// ===== 全书通读：人物普查 + 统计分配 =====
+
+const cnSurveyTemplate = (chunk: string) => `
+【人物普查】
+下面是小说中的某一章内容。请列出其中出现的所有**具名人物**（有姓名或固定称呼的角色；无名路人、代词一律不算）。
+每个人物返回：
+- name：人物名字
+- gender：female / male（按文中描述判断，确实无法判断填 unknown）
+- dialog：该人物在此片段中的**对白句数**（整数，没有对白填 0）
+- brief：两三个字的身份提示（如 书生/丫鬟/铁匠）
+只统计本片段中出现的人物；拿不准的也要列出（由后续汇总判断）。
+返回 JSON 格式：
+{"characters":[{"name":"张三","gender":"male","dialog":3,"brief":"书生"}]}
+
+### 小说片段（本章内容）
+${chunk}
+`
+const engSurveyTemplate = (chunk: string) => `
+【Character survey】
+Below is a single chapter of a novel. List ALL named characters that appear (characters with a name or fixed title; unnamed passers-by and pronouns do not count).
+For each character return:
+- name: character name
+- gender: female / male (based on the text; use unknown if truly unclear)
+- dialog: number of dialogue lines this character speaks in this excerpt (integer, 0 if none)
+- brief: 2-3 word identity hint (e.g. scholar / maid / blacksmith)
+Only count characters appearing in this excerpt; include uncertain ones (aggregation happens later).
+Return JSON: {"characters":[{"name":"John","gender":"male","dialog":3,"brief":"scholar"}]}
+
+### Novel excerpt
+${chunk}
+`
+
+export function getCharacterSurveyPrompt(lang = 'cn', chunk: string) {
+  return lang === 'eng' ? engSurveyTemplate(chunk) : cnSurveyTemplate(chunk)
+}
+
+const cnAssignTemplate = (table: string, voiceList: { Name: string; Gender?: string }[]) => `
+【角色音色分配】
+下面是对**全书**进行人物普查后的统计表（已按对白句数降序截取）。请为每个角色从声音配置中挑选最合适的音色。要求：
+1. 只能使用声音配置中存在的 Name，不得编造。
+2. gender 优先采用统计表中的值；为 unknown 时按姓名常识判断。所选音色的性别必须与角色性别一致。
+3. 同一角色只有一个音色；角色之间音色不要重复。
+4. **称呼归并**：统计表中不同称呼可能指同一角色（如 宝玉/贾宝玉、凤姐/王熙凤、老太太/贾母）。若判断多个称呼属于同一角色，必须合并为一项：character 使用最正式的全名。合并后总行数可少于统计表。
+5. 统计表中未出现的叙述性内容由"旁白"承担，必须包含一个名为"旁白"的角色。
+6. description 用一句**中文**概括角色性格与身份（可结合人物姓名常识推断），必须使用中文，不得使用英文。
+7. 返回 JSON 格式。
+
+### 人物统计表（name | gender | 对白句数 | 身份提示）
+${table}
+
+### 声音配置
+${JSON.stringify(voiceList, null, 2)}
+
+### 最终返回JSON格式
+{
+  "characters": [
+    { "character": "贾宝玉", "aliases": ["宝玉"], "gender": "male", "voice": "声音配置中的 Name", "description": "性格与身份简述" }
+  ]
+}
+`
+const engAssignTemplate = (table: string, voiceList: { Name: string; Gender?: string }[]) => `
+【Character voice assignment】
+Below is the character census of the **whole book** (sorted by dialogue count, truncated). Assign each character the most suitable voice from the sound configuration. Requirements:
+1. Only use existing Name values from the sound configuration.
+2. Prefer the gender from the table; if unknown, infer from the name. The voice's gender MUST match the character's gender.
+3. One voice per character; characters must not share voices.
+4. **Alias merging**: different names in the table may refer to the same character. If so, merge them into one entry: use the most formal full name as "character" and put the other names in "aliases". The merged total may be fewer than the table rows.
+5. Narration not covered by the table belongs to "Narrator" — always include a character named "Narrator".
+6. description: one sentence about the character's personality and role.
+7. Return JSON.
+
+### Character census (name | gender | dialogue lines | identity hint)
+${table}
+
+### Sound configuration
+${JSON.stringify(voiceList, null, 2)}
+
+### Final Output JSON format
+{
+  "characters": [
+    { "character": "Elizabeth Bennet", "aliases": ["Lizzy", "Eliza"], "gender": "female", "voice": "Name from sound configuration", "description": "personality summary" }
+  ]
+}
+`
+
+export function getCharacterAssignPrompt(
+  lang = 'cn',
+  voiceList: { Name: string; Gender?: string }[],
+  table: string
+) {
+  return lang === 'eng'
+    ? engAssignTemplate(table, voiceList)
+    : cnAssignTemplate(table, voiceList)
 }

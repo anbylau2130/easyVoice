@@ -16,6 +16,7 @@ import {
   chapterFilePath,
   bookOutputDir,
   planBookVoices,
+  stopPlanVoices,
   saveCharacterVoices,
   updateChapterSelection,
 } from '../services/book/book.service'
@@ -235,6 +236,19 @@ export async function planVoicesHandler(req: Request, res: Response, next: NextF
   try {
     await planBookVoices(req.params.id)
     res.json({ success: true, code: 200, message: '已开始规划角色音色' })
+  } catch (error) {
+    res.status(400).json({ success: false, code: 400, message: (error as Error).message })
+  }
+}
+
+export async function stopPlanVoicesHandler(req: Request, res: Response) {
+  try {
+    const accepted = stopPlanVoices(req.params.id)
+    if (!accepted) {
+      res.status(400).json({ success: false, code: 400, message: '当前没有正在进行的规划' })
+      return
+    }
+    res.json({ success: true, code: 200, message: '正在停止规划，当前章节读完即生效' })
   } catch (error) {
     res.status(400).json({ success: false, code: 400, message: (error as Error).message })
   }

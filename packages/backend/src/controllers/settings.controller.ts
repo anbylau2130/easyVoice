@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 import { z } from 'zod'
 import { logger } from '../utils/logger'
-import { getLlmSettings, saveLlmSettings } from '../services/settings.service'
+import { getLlmSettings, saveLlmSettings, testLlmSettings } from '../services/settings.service'
 import {
   getCloneSettings,
   saveCloneSettings,
@@ -105,6 +105,26 @@ export async function testCloneHandler(_req: Request, res: Response, next: NextF
     res.json({ success: true, code: 200, data: result })
   } catch (error) {
     logger.warn(`testCloneService failed: ${(error as Error).message}`)
+    res.status(500).json({ success: false, code: 500, message: (error as Error).message })
+  }
+}
+
+/** LLM 连通性测试：用表单当前值发起一次最小真实调用（缺省项回落已保存配置/.env） */
+export async function testLlmSettingsHandler(req: Request, res: Response) {
+  try {
+    const parsed = llmSettingsSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        code: 400,
+        message: parsed.error.issues[0]?.message || '参数格式错误',
+      })
+      return
+    }
+    const result = await testLlmSettings(parsed.data)
+    res.json({ success: true, code: 200, data: result })
+  } catch (error) {
+    logger.warn(`testLlmSettings failed: ${(error as Error).message}`)
     res.status(500).json({ success: false, code: 500, message: (error as Error).message })
   }
 }
