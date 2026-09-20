@@ -19,11 +19,16 @@ class SubtitleMergeError extends Error {
 /**
  * 合并多个字幕文件为一个连续的字幕序列
  * @param subtitleFiles 包含多个字幕文件的数组
- * @param gap 可选的每个文件之间的间隙时间（默认为0）
+ * @param gap 可选的每个文件之间的统一间隙时间（默认为0）
+ * @param gaps 可选的逐边界间隙数组（毫秒）：gaps[i] 为第 i 个文件之后的停顿；优先生效
  * @returns 合并后的字幕数组
  * @throws SubtitleMergeError 如果输入无效
  */
-export function mergeSubtitleFiles(subtitleFiles: SubtitleFiles, gap: number = 0): SubtitleItem[] {
+export function mergeSubtitleFiles(
+  subtitleFiles: SubtitleFiles,
+  gap: number = 0,
+  gaps?: number[]
+): SubtitleItem[] {
   if (!Array.isArray(subtitleFiles))
     throw new SubtitleMergeError('Input must be an array of subtitle files')
 
@@ -57,7 +62,8 @@ export function mergeSubtitleFiles(subtitleFiles: SubtitleFiles, gap: number = 0
 
       if (file.length > 0 && index < subtitleFiles.length - 1) {
         const lastItem = file[file.length - 1]
-        timeOffset = lastItem.end + timeOffset + gap
+        const boundaryGap = gaps?.[index] ?? gap
+        timeOffset = lastItem.end + timeOffset + boundaryGap
       }
     })
 

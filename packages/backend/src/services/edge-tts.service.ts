@@ -42,12 +42,15 @@ export async function runEdgeTTS({
   style,
   styleDegree,
   lang,
+  trailingBreakMs,
 }: Omit<EdgeSchema, 'useLLM'> & {
   output: string
   outputType?: string
   style?: string
   styleDegree?: string
   lang?: string
+  /** 文本结束后追加的 SSML 停顿毫秒数（段间自然停顿） */
+  trailingBreakMs?: number
 }) {
   // 自定义音色（声音克隆）：路由到本地克隆 TTS 服务
   if (isCustomVoice(voice)) {
@@ -92,6 +95,7 @@ export async function runEdgeTTS({
       timeout: 30_000,
       style: withStyle,
       styleDegree: withStyle && useStyleDegree && Number.isFinite(useStyleDegree) ? useStyleDegree : undefined,
+      trailingBreakMs,
     })
   console.log(`run with nodejs edge-tts service...`)
   if (outputType === 'file') {
@@ -178,7 +182,7 @@ export async function previewPresetVoice(params: {
   }
 }
 export const generateSingleVoice = async (
-  params: Omit<EdgeSchema, 'useLLM'> & { output: string }
+  params: Omit<EdgeSchema, 'useLLM'> & { output: string; trailingBreakMs?: number }
 ) => {
   let result: TTSResult = {
     audio: '',

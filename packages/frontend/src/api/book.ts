@@ -200,9 +200,10 @@ export const chapterAudioUrl = (id: string, index: number) =>
 export const chapterSrtUrl = (id: string, index: number) =>
   `${api.defaults.baseURL}/${id}/chapter/${index}/srt`
 
-export const planVoices = async (id: string) => {
+export const planVoices = async (id: string, mode?: 'match' | 'generate') => {
   const response = await api.post<{ success: boolean; code: number; message?: string }>(
-    `/${id}/planVoices`
+    `/${id}/planVoices`,
+    mode ? { mode } : {}
   )
   if (response.data?.code !== 200) {
     throw new Error(response.data?.message || '规划失败')

@@ -234,7 +234,9 @@ export async function chapterSrtHandler(req: Request, res: Response, next: NextF
 
 export async function planVoicesHandler(req: Request, res: Response, next: NextFunction) {
   try {
-    await planBookVoices(req.params.id)
+    // 分配方式：match=按性格匹配已配置音色（默认）；generate=AI 为每个角色生成专属音色
+    const mode = req.body?.mode === 'generate' ? 'generate' : 'match'
+    await planBookVoices(req.params.id, mode)
     res.json({ success: true, code: 200, message: '已开始规划角色音色' })
   } catch (error) {
     res.status(400).json({ success: false, code: 400, message: (error as Error).message })

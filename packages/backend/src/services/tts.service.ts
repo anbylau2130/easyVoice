@@ -241,7 +241,14 @@ async function buildSegmentList(
       onProgress?.(handledLength, length)
       return cache
     }
-    const result = await generateSingleVoice({ text, pitch, voice, rate, volume, output })
+    const result = await generateSingleVoice({
+      text,
+      pitch,
+      voice,
+      rate,
+      volume,
+      output,
+    })
     logger.debug(`Cache miss and generate audio: ${result.audio}, ${result.srt}`)
     fileList.push(result.audio)
     handledLength++
@@ -257,10 +264,17 @@ async function buildSegmentList(
     logger.warn(`Partial result detected, some splits generated audio failed!`, results)
     partial = true
   }
+  // 段间停顿：Edge 免费端点不支持 SSML break，改为拼接时插入真实静音。
+  // 说话人切换停顿更长（520ms），同一说话人较短（260ms），末段不加
+  const segmentPausesMs = segments.map((segment, index) => {
+    const next = segments[index + 1]
+    if (!next) return 0
+    return next.voice !== segment.voice ? 520 : 260
+  })
   const outputFile = path.resolve(AUDIO_DIR, id)
   logger.debug(`Concatenating audio files from ${tmpDirPath} to ${outputFile}`)
-  await concatDirAudio({ inputDir: tmpDirPath, fileList, outputFile })
-  await concatDirSrt({ inputDir: tmpDirPath, fileList, outputFile })
+  await concatDirAudio({ inputDir: tmpDirPath, fileList, outputFile, segmentPausesMs })
+  await concatDirSrt({ inputDir: tmpDirPath, fileList, outputFile, segmentPausesMs })
   logger.debug(
     `Concatenating SRT files from ${tmpDirPath} to ${outputFile.replace('.mp3', '.srt')}`
   )
@@ -305,18 +319,53 @@ function validateTTSResult(result: TTSResult, segmentId: string): void {
 }
 
 /**
- * 拼接音频文件
+ * 拼接音频文件（可选段间静音插入，用于对话/段落间的自然停顿）
  */
 export async function concatDirAudio({
   fileList,
   outputFile,
   inputDir,
+  segmentPausesMs,
 }: ConcatAudioParams): Promise<void> {
   const mp3Files = sortAudioDir(fileList, '.mp3')
   if (!mp3Files.length) throw new Error('No MP3 files found in input directory')
 
+  let listEntries = mp3Files.map((file) => `file '${file}'`)
+  if (segmentPausesMs?.some((ms) => ms > 0)) {
+    // Edge 免费端点不支持 SSML break：段间停顿用真实静音片段在拼接时插入。
+    // 静音参数与 Edge 输出一致（24kHz 单声道 96kbps MP3），保证 concat copy 兼容
+    const silFiles = new Map<number, string>()
+    const entries: string[] = []
+    for (let i = 0; i < mp3Files.length; i++) {
+      entries.push(`file '${mp3Files[i]}'`)
+      const ms = segmentPausesMs[i] || 0
+      if (ms > 0 && i < mp3Files.length - 1) {
+        let sil = silFiles.get(ms)
+        if (!sil) {
+          const silPath = path.resolve(inputDir, `pause_${ms}ms.mp3`)
+          await new Promise<void>((resolve, reject) => {
+            ffmpeg()
+              .input('anullsrc=r=24000:cl=mono')
+              .inputFormat('lavfi')
+              .audioCodec('libmp3lame')
+              .audioBitrate(96)
+              .duration(ms / 1000)
+              .output(silPath)
+              .on('end', () => resolve())
+              .on('error', (err) => reject(new Error(`Silence generation failed: ${err.message}`)))
+              .run()
+          })
+          sil = silPath
+          silFiles.set(ms, sil)
+        }
+        entries.push(`file '${sil}'`)
+      }
+    }
+    listEntries = entries
+  }
+
   const tempListPath = path.resolve(inputDir, 'file_list.txt')
-  await fs.writeFile(tempListPath, mp3Files.map((file) => `file '${file}'`).join('\n'))
+  await fs.writeFile(tempListPath, listEntries.join('\n'))
 
   await new Promise<void>((resolve, reject) => {
     ffmpeg()
@@ -332,12 +381,13 @@ export async function concatDirAudio({
 }
 
 /**
- * 拼接字幕文件
+ * 拼接字幕文件（与音频静音插入同步：逐边界补偿段间停顿，保证字幕不漂移）
  */
 export async function concatDirSrt({
   fileList,
   outputFile,
   inputDir,
+  segmentPausesMs,
 }: ConcatAudioParams): Promise<void> {
   const jsonFiles = sortAudioDir(
     fileList.map((file) => `${file}.json`),
@@ -353,7 +403,7 @@ export async function concatDirSrt({
     logger.warn('No subtitle data found, skip srt merge')
     return
   }
-  const mergedJson = mergeSubtitleFiles(subtitleFiles)
+  const mergedJson = mergeSubtitleFiles(subtitleFiles, 0, segmentPausesMs)
   const tempJsonPath = path.resolve(inputDir, 'all_splits.mp3.json')
   await fs.writeFile(tempJsonPath, JSON.stringify(mergedJson, null, 2))
   await generateSrt(tempJsonPath, outputFile.replace('.mp3', '.srt'))
@@ -374,4 +424,6 @@ export interface ConcatAudioParams {
   fileList: string[]
   outputFile: string
   inputDir: string
+  /** 段间停顿毫秒：pauses[i] 为第 i 段之后插入的静音时长（最后一段为 0）。提供时按显式顺序拼接 */
+  segmentPausesMs?: number[]
 }

@@ -3,15 +3,20 @@ import path from 'path'
 import fs from 'fs/promises'
 import { AUDIO_DIR } from '../../config'
 import { logger } from '../../utils/logger'
-import { asyncSleep, ensureDir, getLangConfig, readJson } from '../../utils'
+import { asyncSleep, ensureDir, getLangConfig, readJson, safeRunWithRetry } from '../../utils'
+import { openai } from '../../utils/openai'
 import { generateTTS, TtsProgressCallback } from '../tts.service'
 import {
+  planCharacterVoices,
   surveyBookCharacters,
   describeCharacters,
+  assignVoicesByPersonality,
+  parseJsonLoose,
   CharacterStat,
   CharacterVoice,
 } from '../../llm/segmentParser'
-import { listVoicePresets } from '../voicePreset.service'
+import { extractSegmentArray } from '../../llm/segmentParser'
+import { listVoicePresets, saveVoicePreset } from '../voicePreset.service'
 import { listCustomVoices } from '../customVoice.service'
 import type { ParsedChapter } from './chapter.service'
 
@@ -542,7 +547,10 @@ export function stopPlanVoices(id: string): boolean {
   return true
 }
 
-export async function planBookVoices(id: string): Promise<void> {
+export async function planBookVoices(
+  id: string,
+  assignMode: 'match' | 'generate' = 'match'
+): Promise<void> {
   if (!BOOK_ID_PATTERN.test(id)) throw new Error('无效的有声书 ID')
   if (planningIds.has(id)) throw new Error('角色音色正在规划中，请稍候')
   if (runningIds.has(id)) throw new Error('有声书正在生成中，请先暂停后再规划')
@@ -581,30 +589,40 @@ export async function planBookVoices(id: string): Promise<void> {
           chapterTexts.find((t) => t.content && t.content.length > 100)?.content.slice(0, 2000) ||
           book.title
         const { lang, voiceList } = await getLangConfig(langProbe)
-        const customVoices = await listCustomVoices()
-        // 自定义 Edge 音色预设作为候选：并入 voiceList（带性别供 AI 匹配）并加入 extraVoices（不受语言过滤限制）。
+        // 角色音色只从用户配置的 Edge 预设中选取（系统音色不参与 AI 分配）。
         // excludeFromAI 的特殊预设（方言/港台腔）不进入 AI 候选，仅供手动选用
         const presets = (await listVoicePresets()).filter((p) => !p.excludeFromAI)
-        const presetVoiceEntries = presets.map((p) => ({
+        const candidateVoiceList = presets.map((p) => ({
           Name: p.id,
           Gender: p.gender || '',
           ContentCategories: ['自定义'],
           VoicePersonalities: [p.voice],
         }))
-        const candidateVoiceList = [...voiceList, ...presetVoiceEntries]
-        // 用户在创建时选择的音色作为旁白基准
-        const narratorBase = book.params.voice
-        // 按性别轮转的默认音色：新角色登记时立即预分配，用户可随时在角色表里改。
-        // 音色池优先 zh-CN（用户要求角色一律中文音色），无匹配性别时回落到全部 zh-CN
+        // 用户还没有任何预设时，回落到系统 zh-CN 音色，保证规划功能可用
+        if (!candidateVoiceList.length) {
+          candidateVoiceList.push(
+            ...voiceList
+              .filter((v) => v.Name.startsWith('zh-CN'))
+              .map((v) => ({
+                Name: v.Name,
+                Gender: v.Gender || '',
+                ContentCategories: v.ContentCategories || [],
+                VoicePersonalities: v.VoicePersonalities || [],
+              }))
+          )
+        }
+        // 旁白基准音色：用户创建时选择的音色若为 Edge 预设则沿用，否则用首个预设音色
+        const narratorBase = candidateVoiceList.some((v) => v.Name === book.params.voice)
+          ? book.params.voice
+          : candidateVoiceList[0]?.Name || book.params.voice
+        // 按性别轮转的默认音色：新角色登记时立即预分配（仅使用 Edge 预设池），用户可随时在角色表里改
         const voiceCursor = new Map<string, number>()
         const pickVoice = (gender?: string) => {
-          const zh = candidateVoiceList.filter((v) => v.Name.startsWith('zh-CN'))
-          const base = zh.length ? zh : candidateVoiceList
-          const pool = base.filter((v) => {
+          const pool = candidateVoiceList.filter((v) => {
             if (!gender || gender === 'unknown') return true
             return gender === 'female' ? v.Gender === 'Female' : v.Gender === 'Male'
           })
-          const candidates = pool.length ? pool : base
+          const candidates = pool.length ? pool : candidateVoiceList
           const key = gender || 'any'
           const i = voiceCursor.get(key) || 0
           voiceCursor.set(key, i + 1)
@@ -707,7 +725,6 @@ export async function planBookVoices(id: string): Promise<void> {
           const current = await loadBook(id)
           const rows = current?.characterVoices || []
           if (rows.length) {
-            const briefs = new Map(rows.map((c) => [c.character, c.description] as const))
             const enriched = await describeCharacters({
               lang,
               characters: rows.map((c) => ({
@@ -716,12 +733,26 @@ export async function planBookVoices(id: string): Promise<void> {
                 brief: c.description?.slice(0, 12),
                 aliases: c.aliases,
               })),
+              onProgress: (label) => setDetail(label),
             })
             await update((b) => {
               for (const row of b.characterVoices || []) {
-                const d = enriched.get(row.character)
-                // 仅覆盖"普查提示"级别的描述；用户手动写过的描述保持不变
-                if (d && (!row.description || row.description === briefs.get(row.character))) {
+                let d = enriched.get(row.character)
+                if (!d) {
+                  // 双向包含匹配：LLM 返回的名字可能是变体（如"贾宝玉"vs 行名"宝玉"）
+                  for (const [k, v] of enriched) {
+                    if (
+                      k.length >= 2 &&
+                      row.character.length >= 2 &&
+                      (k.includes(row.character) || row.character.includes(k))
+                    ) {
+                      d = v
+                      break
+                    }
+                  }
+                }
+                // 仅覆盖"普查提示"级别的短描述（≤12 字）；用户手动写的详细描述保持不变
+                if (d && (!row.description || row.description.length <= 12)) {
                   row.description = d
                 }
               }
@@ -729,6 +760,136 @@ export async function planBookVoices(id: string): Promise<void> {
           }
         } catch (e) {
           logger.warn(`Character description enrichment skipped: ${(e as Error).message}`)
+        }
+        // ===== 音色分配（两种可配置模式）=====
+        if (assignMode === 'generate') {
+          // 模式 B：AI 为每个角色生成专属音色——按对白数轮转分配 zh-CN 基础音色
+          // （主要角色声线不重复），LLM 再按性格微调语速/音调/音量，以角色命名生成预设
+          await setDetail('正在为各角色生成专属音色…')
+          const genBook = await loadBook(id)
+          const genRows = (genBook?.characterVoices || []).filter((r) => r.character !== '旁白')
+          const zhBases = voiceList.filter((v) => v.Name.startsWith('zh-CN'))
+          const femaleBases = zhBases.filter((v) => v.Gender === 'Female')
+          const maleBases = zhBases.filter((v) => v.Gender === 'Male')
+          const sorted = [...genRows].sort((a, b) => (b.dialog || 0) - (a.dialog || 0))
+          const cursor = { Female: 0, Male: 0 }
+          const baseOf = new Map<string, string>()
+          for (const row of sorted) {
+            const isMale = row.gender !== 'female'
+            const pool = isMale ? maleBases : femaleBases
+            if (!pool.length) continue
+            const key = isMale ? 'Male' : 'Female'
+            const base = pool[cursor[key] % pool.length]
+            cursor[key]++
+            baseOf.set(row.character, base.Name)
+            logger.info(`Voice generate: ${row.character} -> base ${base.Name}`)
+          }
+          // LLM 按性格微调参数（快速模式；失败则使用默认参数，仍有基础音色轮转保证区分度）
+          const paramMap = new Map<string, { rate?: string; pitch?: string; volume?: string }>()
+          try {
+            const paramRows = sorted.filter((r) => baseOf.has(r.character))
+            const paramTable = paramRows
+              .map(
+                (r) =>
+                  `${r.character}（基础音色 ${baseOf.get(r.character)!.replace('zh-CN-', '')}，${r.gender === 'male' ? '男' : '女'}，对白${r.dialog || 0} 句）：${r.description || '身份未知'}`
+              )
+              .join('\n')
+            const prompt = `以下是一部小说的角色列表，每个角色已分配了基础音色。请根据角色性格，为每个角色微调语音参数使其更有辨识度。要求：
+1. rate 语速范围 -15%~+15%，pitch 音调范围 -10Hz~+10Hz，volume 音量范围 -12%~+12%；
+2. 参数要贴合角色性格（如 急躁角色语速偏快、沉稳角色语速偏慢、威严角色音调略低）；
+3. 使用相同基础音色的角色之间参数要明显错开；
+4. 逐个角色都要返回，不要遗漏。只输出 JSON：{"assignments":[{"character":"角色名","rate":"+5%","pitch":"-4Hz","volume":"+6%"}]}
+
+### 角色与基础音色
+${paramTable}`
+            const resp = await safeRunWithRetry(
+              async () => {
+                return await openai.createChatCompletion({
+                  messages: [
+                    { role: 'system', content: 'You are a helpful assistant. And you can return valid json object' },
+                    { role: 'user', content: prompt },
+                  ],
+                  temperature: 0.3,
+                  max_tokens: 2000,
+                  ...openai.fastExtractFields(openai.getModel()),
+                  response_format: { type: 'json_object' },
+                })
+              },
+              { retries: 2, baseDelayMs: 3000 }
+            )
+            const content = resp.choices[0]?.message?.content
+            if (!content) throw new Error('LLM returned empty content')
+            const parsed = parseJsonLoose(content)
+            const arr = extractSegmentArray(parsed)
+            for (const item of arr || []) {
+              const character = typeof item.character === 'string' ? item.character.trim() : ''
+              const rate = typeof item.rate === 'string' ? item.rate : ''
+              const pitch = typeof item.pitch === 'string' ? item.pitch : ''
+              const volume = typeof item.volume === 'string' ? item.volume : ''
+              if (character) paramMap.set(character, { rate, pitch, volume })
+            }
+          } catch (e) {
+            logger.warn(`Voice param generation failed, using defaults: ${(e as Error).message}`)
+          }
+          // 以角色命名生成专属预设并分配（重规划同名覆盖、ID 不变）
+          for (const row of sorted) {
+            const base = baseOf.get(row.character)
+            if (!base) continue
+            const p = paramMap.get(row.character) || {}
+            const preset = await saveVoicePreset({
+              name: row.character,
+              voice: base,
+              rate: p.rate,
+              pitch: p.pitch,
+              volume: p.volume,
+              gender: row.gender,
+            })
+            await update((b) => {
+              for (const r2 of b.characterVoices || []) {
+                if (r2.character === row.character) r2.voice = preset.id
+              }
+            })
+          }
+          logger.info(`Generated exclusive voices for book ${id}: ${sorted.length} characters`)
+        } else {
+        // 按性格分配音色：LLM 依据角色性别+性格描述，从预设库中挑选最贴合的声线。
+        // 性别不一致的分配会被跳过（保留原音色）
+        await setDetail('正在按角色性格分配音色…')
+        try {
+          const matchBook = await loadBook(id)
+          const matchRows = matchBook?.characterVoices || []
+          const presetsAll = (await listVoicePresets()).filter((p) => !p.excludeFromAI)
+          if (matchRows.length && presetsAll.length) {
+            const genderOfPreset = new Map(presetsAll.map((p) => [p.id, p.gender || ''] as const))
+            const assignments = await assignVoicesByPersonality({
+              lang,
+              characters: matchRows.map((c) => ({
+                character: c.character,
+                gender: c.gender,
+                description: c.description,
+                dialog: c.dialog,
+              })),
+              presets: presetsAll.map((p) => ({ id: p.id, name: p.name, gender: p.gender })),
+            })
+            let applied = 0
+            await update((b) => {
+              for (const row of b.characterVoices || []) {
+                const voice = assignments.get(row.character)
+                if (!voice) continue
+                // 性别一致性兜底：预设性别与角色性别冲突时不采用
+                const pg = genderOfPreset.get(voice) || ''
+                if (row.gender && pg && row.gender !== pg) continue
+                row.voice = voice
+                applied++
+              }
+            })
+            logger.info(
+              `Personality-based voice assignment applied for book ${id}: ${applied}/${matchRows.length}`
+            )
+          }
+        } catch (e) {
+          logger.warn(`Personality voice assignment skipped: ${(e as Error).message}`)
+        }
         }
         await update((b) => {
           b.planningDetail = `全书通读完成，共收录 ${discovered} 个角色音色（可在角色表中继续调整）`

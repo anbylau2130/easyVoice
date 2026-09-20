@@ -3,10 +3,10 @@ import { asyncSleep, safeRunWithRetry } from '../utils'
 import { openai } from '../utils/openai'
 import {
   getCharacterAssignPrompt,
-  getCharacterDescribePrompt,
   getCharacterPlanPrompt,
   getCharacterSegmentPrompt,
   getCharacterSurveyPrompt,
+  getCharacterVoiceMatchPrompt,
   getPrompt,
 } from './prompt/generateSegment'
 
@@ -304,6 +304,20 @@ export interface CharacterStat {
   mentioned?: string
 }
 
+/** 宽松 JSON 提取：容忍 ```json 围栏与前后杂文，截取首个完整 JSON 对象 */
+export function parseJsonLoose(text: string): unknown {
+  const cleaned = text
+    .trim()
+    .replace(/^```(?:json)?/i, '')
+    .replace(/```\s*$/, '')
+  const start = cleaned.indexOf('{')
+  const end = cleaned.lastIndexOf('}')
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error('no JSON object found in response')
+  }
+  return JSON.parse(cleaned.slice(start, end + 1))
+}
+
 /** 逐章成块；单章超过 chunkSize 时硬切成多个部分（进度仍按该章显示） */
 function buildChunks(
   items: { content: string; label: string }[],
@@ -525,6 +539,67 @@ export async function surveyBookCharacters({
 }
 
 /**
+ * 通读完成后，按角色性格从预设库中挑选最贴合的音色。
+ * 角色需带性别与性格描述（describeCharacters 的产物），预设名即性格标签。
+ * 返回 角色名 -> 预设音色 ID 的映射；无法匹配的角色由上层保留原音色。
+ */
+export async function assignVoicesByPersonality({
+  lang = 'zh',
+  characters,
+  presets,
+  retries = 2,
+}: {
+  lang?: string
+  characters: { character: string; gender?: string; description?: string; dialog?: number }[]
+  presets: { id: string; name: string; gender?: string }[]
+  retries?: number
+}): Promise<Map<string, string>> {
+  const presetIds = new Set(presets.map((p) => p.id))
+  const charTable = characters
+    .map(
+      (c) =>
+        `${c.character} | ${c.gender || 'unknown'} | 对白${c.dialog || 0}句 | ${c.description || ''}`
+    )
+    .join('\n')
+  const presetTable = presets
+    .map((p) => `${p.name} | ${p.id} | ${(p.gender || '').toLowerCase() || 'unknown'}`)
+    .join('\n')
+  const out = new Map<string, string>()
+  try {
+    return await safeRunWithRetry(
+      async () => {
+        const response = await openai.createChatCompletion({
+          messages: [
+            { role: 'system', content: 'You are a helpful assistant. And you can return valid json object' },
+            { role: 'user', content: getCharacterVoiceMatchPrompt(lang, charTable, presetTable) },
+          ],
+          temperature: 0.2,
+          max_tokens: 3000,
+          ...openai.fastExtractFields(openai.getModel()),
+          response_format: { type: 'json_object' },
+        })
+        const content = response.choices[0]?.message?.content
+        if (!content) throw new Error('LLM returned empty content')
+        const parsed = JSON.parse(content)
+        const arr = extractSegmentArray(parsed)
+        if (!arr?.length) throw new Error('voice match returned no entries')
+        for (const item of arr) {
+          const character = typeof item.character === 'string' ? item.character.trim() : ''
+          const voice = typeof item.voice === 'string' ? item.voice.trim() : ''
+          if (character && voice && presetIds.has(voice)) out.set(character, voice)
+        }
+        if (!out.size) throw new Error('voice match returned no valid assignments')
+        return out
+      },
+      { retries, baseDelayMs: 3000 }
+    )
+  } catch (err) {
+    logger.warn(`Voice personality matching failed: ${(err as Error).message}`)
+    return out
+  }
+}
+
+/**
  * 通读完成后，为全部角色生成一句中文性格/身份描述（替代普查阶段的简短提示）。
  * 失败时返回空映射，上层回落使用普查身份提示，不影响规划结果。
  */
@@ -532,6 +607,7 @@ export async function describeCharacters({
   lang = 'zh',
   characters,
   retries = 2,
+  onProgress,
 }: {
   lang?: string
   characters: {
@@ -541,51 +617,47 @@ export async function describeCharacters({
     aliases?: string[]
   }[]
   retries?: number
+  /** 每个角色的描述进度回调（如"正在生成角色性格描述（3/30）：王熙凤"） */
+  onProgress?: (label: string) => void
 }): Promise<Map<string, string>> {
-  const table = characters
-    .map((c) => {
-      const aliasText = c.aliases?.length ? ` | 书中其他称呼: ${c.aliases.join('、')}` : ''
-      return `${c.name}${aliasText} | 对白${c.dialog || 0}句${c.brief ? ` | ${c.brief}` : ''}`
-    })
-    .join('\n')
   const out = new Map<string, string>()
-  try {
-    return await safeRunWithRetry(
-      async () => {
-        const response = await openai.createChatCompletion({
-          messages: [
-            { role: 'system', content: 'You are a helpful assistant. And you can return valid json object' },
-            { role: 'user', content: getCharacterDescribePrompt(lang, table) },
-          ],
-          temperature: 0.3,
-          max_tokens: 3000,
-          ...openai.fastExtractFields(openai.getModel()),
-          response_format: { type: 'json_object' },
-        })
-        const content = response.choices[0]?.message?.content
-        if (!content) throw new Error('LLM returned empty content')
-        const parsed = JSON.parse(content)
-        const arr = extractSegmentArray(parsed)
-        if (!arr?.length) throw new Error('describe returned no entries')
-        for (const item of arr) {
-          const name =
-            typeof item.character === 'string'
-              ? item.character.trim()
-              : typeof item.name === 'string'
-              ? item.name.trim()
-              : ''
-          const desc = typeof item.description === 'string' ? item.description.trim() : ''
-          if (name && desc) out.set(name, desc.slice(0, 100))
-        }
-        if (!out.size) throw new Error('describe returned no valid entries')
-        return out
-      },
-      { retries, baseDelayMs: 3000 }
-    )
-  } catch (err) {
-    logger.warn(`Character description enrichment failed: ${(err as Error).message}`)
-    return out
+  // 逐角色生成详细描述：单角色小任务，关思考即可输出高质量长文本，
+  // 串行执行避免限速；单角色失败只跳过该角色，不影响其他角色
+  let done = 0
+  for (const c of characters) {
+    const aliasText = c.aliases?.length ? `（书中又称：${c.aliases.join('、')}）` : ''
+    const label = `正在生成角色性格描述（${done + 1}/${characters.length}）：${c.name}`
+    onProgress?.(label)
+    try {
+      const response = await safeRunWithRetry(
+        async () =>
+          await openai.createChatCompletion({
+            messages: [
+              { role: 'system', content: 'You are a helpful assistant. And you can return valid json object' },
+              {
+                role: 'user',
+                content: `请为小说角色写一段详细的人物描述。角色：${c.name}${aliasText}；身份提示：${c.brief || '未知'}；全书对白 ${c.dialog || 0} 句。要求：以所有称呼开头，然后详细描述其性格特点、身份背景、说话语气（结合对白数推断：对白多者健谈、无对白者沉默寡言），共 80~150 字。直接输出 JSON：{"description":"..."}`,
+              },
+            ],
+            temperature: 0.5,
+            max_tokens: 1500,
+            ...openai.fastExtractFields(openai.getModel()),
+          }),
+        { retries, baseDelayMs: 3000 }
+      )
+      const content = response.choices[0]?.message?.content
+      if (!content) throw new Error('LLM returned empty content')
+      const parsed = parseJsonLoose(content) as { description?: string }
+      const desc = typeof parsed.description === 'string' ? parsed.description.trim() : ''
+      if (!desc) throw new Error('empty description')
+      out.set(c.name, desc.slice(0, 200))
+      done++
+      logger.info(`Character described: ${c.name} (${desc.length} chars)`)
+    } catch (err) {
+      logger.warn(`Describe failed for ${c.name}: ${(err as Error).message}`)
+    }
   }
+  return out
 }
 
 /**

@@ -471,6 +471,15 @@
           选择章节
         </el-button>
         <template v-if="bookDetail?.params.useLLM">
+          <el-radio-group
+            v-if="!hasCharacterVoices"
+            v-model="voiceAssignMode"
+            :disabled="!!bookDetail.planning"
+            style="margin-right: 16px"
+          >
+            <el-radio value="match">按性格匹配已配置音色</el-radio>
+            <el-radio value="generate">AI 生成专属音色（每角色独立）</el-radio>
+          </el-radio-group>
           <el-button
             v-if="!hasCharacterVoices"
             type="primary"
@@ -772,6 +781,8 @@ const savingLlm = ref(false)
 
 // 角色音色规划/编辑/试听
 const planningLoading = ref(false)
+// 音色分配方式：match=按性格匹配已配置预设；generate=AI 为每个角色生成专属预设
+const voiceAssignMode = ref<'match' | 'generate'>('generate')
 const stoppingPlan = ref(false)
 async function handleStopPlan() {
   if (!bookId.value) return
@@ -1143,7 +1154,7 @@ async function handlePlanVoices() {
   if (!bookId.value) return
   planningLoading.value = true
   try {
-    await planVoices(bookId.value)
+    await planVoices(bookId.value, voiceAssignMode.value)
     ElMessage.success('已开始逐章通读全书，发现的角色会实时出现在下方角色表中，可随时调整音色')
   } catch (error) {
     ElMessage.error((error as Error).message)

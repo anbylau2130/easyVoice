@@ -257,32 +257,72 @@ export function getCharacterSurveyPrompt(lang = 'cn', chunk: string, roster: str
 
 const cnDescribeTemplate = (table: string) => `
 【角色性格描述】
-以下是一部小说的角色名单（含全书对白句数、书中其他称呼与身份提示）。请为每个角色写一段**清晰的中文描述**，要求：
-1. 以该角色**在书中的所有称呼**开头：有其他称呼时格式如"贾宝玉（书中又称：宝玉、怡红公子）——"；没有其他称呼时直接以名字开头即可，不要写"又称"或"无"；
-2. 之后概括其性格与身份（可结合姓名常识与对白数推断）；
-3. 总长 60 字以内，必须使用中文，不得使用英文字符，不得直接把人名当描述；
+以下是一部小说的角色名单（含全书对白句数、书中其他称呼与身份提示）。请为每个角色写一段**详细清晰的中文描述**，要求：
+1. 以该角色**在书中的所有称呼**开头：有其他称呼时格式如"贾宝玉（书中又称：宝玉、怡红公子）——"；没有其他称呼时直接以名字开头，不要写"又称"或"无"；
+2. 描述需尽可能详细地涵盖：性格特点、身份背景、在书中的言行倾向、与其他角色的关系、说话语气与习惯（可依据对白句数推断，如对白多者健谈、无对白者沉默寡言）；
+3. 每段 80~150 字，必须使用中文，不得使用英文字符，不得直接把人名当描述；
 4. 逐个角色都要返回，不要遗漏。
 返回 JSON 格式：
-{"characters":[{"character":"贾宝玉","description":"贾宝玉（书中又称：宝玉、怡红公子）——衔玉而生的贵公子，性情纯真多情，厌恶仕途经济"}]}
-
-### 角色名单（character | 书中其他称呼 | 对白句数 | 身份提示）
-${table}
+{"characters":[{"character":"贾宝玉","description":"贾宝玉（书中又称：宝玉、怡红公子）——衔玉而生的贵公子，性情纯真多情又略带叛逆，厌恶仕途经济，对黛玉一往情深；说话率真直白、喜怒形于色，是全书对白最多的核心人物，常有痴语呆论"}]}
 `
 const engDescribeTemplate = (table: string) => `
 【Character descriptions】
-Below is a character list of a novel (with whole-book dialogue counts, other names used in the book, and identity hints). Write a **clear English description** for each character:
-1. Start with ALL names the character is known by in the book, formatted like "Elizabeth Bennet (also known as: Lizzy, Eliza) — ";
-2. Then summarize personality and role (you may infer from the name and dialogue count);
-3. Max 40 words per description.
+Below is a character list of a novel (with whole-book dialogue counts, other names used in the book, and identity hints). Write a **detailed English description** for each character:
+1. Start with ALL names the character is known by in the book, formatted like "Elizabeth Bennet (also known as: Lizzy, Eliza) — "; if none, start with the name directly;
+2. Cover in detail: personality traits, background and role, behavior tendencies in the book, relationships with other characters, and speaking style (infer from dialogue count — chatty characters talk a lot, silent ones barely speak);
+3. 80~150 words per description.
 Return every character. Return JSON:
-{"characters":[{"character":"Elizabeth Bennet","description":"Elizabeth Bennet (also known as: Lizzy, Eliza) — witty, independent gentlewoman who prides herself on judging character"}]}
-
-### Character list (character | other names | dialogue lines | identity hint)
-${table}
+{"characters":[{"character":"Elizabeth Bennet","description":"Elizabeth Bennet (also known as: Lizzy, Eliza) — a witty, independent gentlewoman of modest fortune, quick to judge and slow to change her mind; playful and teasing in conversation, yet deeply loyal to her sister Jane, and one of the most talkative central figures"}]}
 `
 
 export function getCharacterDescribePrompt(lang = 'cn', table: string) {
   return lang === 'eng' ? engDescribeTemplate(table) : cnDescribeTemplate(table)
+}
+
+const cnVoiceMatchTemplate = (charTable: string, presetTable: string) => `
+【按性格分配音色】
+下面是一部小说的角色列表（含性别、性格描述、对白句数）和可选音色列表（音色名称即其性格声线标签，如"泼辣·伶俐女"=精明泼辣的女性声线）。
+请为每个角色选择**最符合其性格与身份**的音色。要求：
+1. voice 只能使用音色列表中已有的 Name（edge-xxxxxxxx 或 zh-CN-xxxNeural），不得编造。
+2. 性别必须一致：女性角色只能选性别为 Female 的音色，男性角色只能选 Male 的音色。
+3. 性格匹配优先，示例：精明泼辣的管家奶奶→「泼辣·伶俐女」；威严的一家之主→「威严·老爷」；多愁善感、体弱多病的才女→「悲情·哀婉女」；吊儿郎当的纨绔子弟→「油滑·浪荡男」；忠厚老实的仆人→「沉稳·学徒」。
+4. 对白最多的主要角色优先分配最贴切的音色、且主要角色之间音色不重复；角色数量多于音色数量时，次要角色可复用音色（性格相近的复用同一个）。
+5. 名为"旁白"的角色优先选择名称含"旁白/叙述/史诗"的音色。
+6. 逐个角色都要分配，不要遗漏。返回 JSON 格式：
+{"assignments":[{"character":"王熙凤","voice":"edge-0dcdc239"}]}
+
+### 角色列表（character | gender | 对白句数 | 性格描述）
+${charTable}
+
+### 音色列表（名称 | Name | 性别）
+${presetTable}
+`
+const engVoiceMatchTemplate = (charTable: string, presetTable: string) => `
+【Assign voices by personality】
+Below are a novel's characters (gender, personality description, dialogue count) and the available voice list (voice names are personality labels, e.g. "泼辣·伶俐女" = a sharp, quick-witted female voice).
+Choose the voice that best fits each character's personality and identity. Requirements:
+1. voice must be an existing Name from the voice list; never invent one.
+2. Gender MUST match: female characters only Female voices; male characters only Male voices.
+3. Personality match first: a shrewd sharp-tongued stewardess → the sharp female voice; a stern patriarch → the stern male voice; a frail sentimental poetess → the melancholic female voice.
+4. Major characters (most dialogue) get the best-fitting and distinct voices; when characters outnumber voices, minor characters may reuse voices (reuse the one with similar personality).
+5. The "旁白" (Narrator) character prefers voices whose names contain 旁白/叙述/史诗.
+6. Assign every character. Return JSON: {"assignments":[{"character":"character name","voice":"voice Name"}]}
+
+### Characters (character | gender | dialogue lines | description)
+${charTable}
+
+### Voices (name | Name | gender)
+${presetTable}
+`
+
+export function getCharacterVoiceMatchPrompt(
+  lang = 'cn',
+  charTable: string,
+  presetTable: string
+) {
+  return lang === 'eng'
+    ? engVoiceMatchTemplate(charTable, presetTable)
+    : cnVoiceMatchTemplate(charTable, presetTable)
 }
 
 const cnAssignTemplate = (table: string, voiceList: { Name: string; Gender?: string }[]) => `

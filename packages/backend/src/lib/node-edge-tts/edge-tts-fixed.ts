@@ -34,6 +34,8 @@ type configure = {
   timeout?: number
   style?: string // 情感风格（mstts:express-as），如 cheerful/sad/whispering；仅部分声音支持
   styleDegree?: number // 情感强度 0.5~2
+  /** 文本结束后追加的停顿毫秒数（SSML break），用于段间自然停顿 */
+  trailingBreakMs?: number
 }
 
 class EdgeTTS {
@@ -50,6 +52,7 @@ class EdgeTTS {
   private timeout: number
   private style: string
   private styleDegree?: number
+  private trailingBreakMs?: number
 
   constructor({
     voice = 'zh-CN-XiaoyiNeural',
@@ -65,6 +68,7 @@ class EdgeTTS {
     timeout = 10000,
     style = '',
     styleDegree,
+    trailingBreakMs,
   }: configure = {}) {
     this.voice = voice
     this.lang = lang
@@ -79,6 +83,7 @@ class EdgeTTS {
     this.timeout = timeout
     this.style = style
     this.styleDegree = styleDegree
+    this.trailingBreakMs = trailingBreakMs
   }
 
   async _connectWebSocket(): Promise<WebSocket> {

@@ -1,14 +1,30 @@
 # EasyVoice Docker Compose
-# 包含：EasyVoice 主服务（本地构建，含有声书/克隆/情感全部功能）+ XTTS 声音克隆服务
+# 一份文件支持三种部署方式（通过 profiles 与 .env 覆盖自由组合）：
 #
-# 启动：  docker compose up -d --build
-# 访问：  http://localhost:3000
+# 【方式一：仅主服务（不含声音克隆）】
+#   docker compose up -d --build
+#   访问 http://localhost:3000；声音克隆功能不可用，其余功能完整
 #
-# AI 模式（智能配音）需要 LLM：在根目录 .env 填 OPENAI_API_KEY / OPENAI_BASE_URL / MODEL_NAME
-# 声音克隆：页面上传参考音频后即可试听/生成（XTTS 服务由本 compose 提供）
+# 【方式二：主服务 + 内置 XTTS 克隆服务（推荐）】
+#   docker compose --profile clone up -d --build
+#   首次启动 XTTS 会下载约 1.8GB 模型（已配 hf-mirror 加速）
 #
-# 如只需快速跑官方镜像（不含克隆等新功能）：
-#   docker run -d -p 3000:3000 -v ./audio:/app/audio cosincox/easyvoice:latest
+# 【方式三：主服务 + 独立部署的克隆服务（另一台机器/GPU 机器）】
+#   1. 克隆机单独运行 XTTS，并共享本机 audio 目录（目录内 custom-voices/ 为参考音频）：
+#      docker run -d -p 8020:8020 --restart unless-stopped \
+#        -v /本机路径/easyVoice/packages/backend/audio:/app/speakers \
+#        -e HF_ENDPOINT=https://hf-mirror.com -e COQUI_TOS_AGREED=1 \
+#        daswer123/xtts-api-server:latest
+#   2. 在根目录 .env 中设置（克隆服务不是本机时，参考音频目录需自行同步）：
+#      TTS_CLONE_URL=http://克隆机IP:8020
+#      TTS_CLONE_SPEAKERS_DIR=/app/speakers/custom-voices
+#   3. docker compose up -d --build
+#
+# 提示：
+# - `docker compose up -d` 想默认带上 XTTS 时，在 .env 里设置 COMPOSE_PROFILES=clone 即可
+# - 声音克隆服务地址也可在页面「声音克隆」卡片中配置（页面配置优先级更高）
+# - AI 模式（智能配音）需要 LLM：在 .env 填 OPENAI_API_KEY / OPENAI_BASE_URL / MODEL_NAME，
+#   或部署后在页面「AI 模型配置」卡片填写（页面配置优先级更高）
 
 services:
   easyvoice:
@@ -24,10 +40,11 @@ services:
       - PORT=3000
       # 容器内使用系统 ffmpeg（alpine 安装），不使用 ffmpeg-static 二进制
       - FFMPEG_PATH=/usr/bin/ffmpeg
-      # 声音克隆服务（daswer123/xtts-api-server），compose 网络内服务名直连
-      - TTS_CLONE_URL=http://xtts-server:8020
-      # 克隆服务容器内看到的说话人目录（audio 卷挂载于 /app/speakers，参考 wav 在 custom-voices 子目录）
-      - TTS_CLONE_SPEAKERS_DIR=/app/speakers/custom-voices
+      # 声音克隆服务地址：默认指向 compose 内的 xtts-server；
+      # 独立部署克隆服务时在 .env 覆盖（如 TTS_CLONE_URL=http://192.168.1.10:8020）
+      - TTS_CLONE_URL=${TTS_CLONE_URL:-http://xtts-server:8020}
+      # 克隆服务容器内看到的说话人目录（参考 wav 所在位置，随部署方式调整）
+      - TTS_CLONE_SPEAKERS_DIR=${TTS_CLONE_SPEAKERS_DIR:-/app/speakers/custom-voices}
       # AI 配音规划用 LLM（也可在页面「AI 模型配置」卡片填写，优先级更高）
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -52,13 +69,15 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-    depends_on:
-      - xtts-server
+    # 克隆服务（xtts-server）为可选依赖（clone profile），不做启动顺序绑定：
+    # 克隆调用发生在运行期且自带重试，未启用克隆时也不阻塞主服务启动
 
+  # XTTS 声音克隆服务（可选）：加 --profile clone 启用，见文件头「方式二」
   xtts-server:
     image: daswer123/xtts-api-server:latest
     container_name: xtts-server
     restart: unless-stopped
+    profiles: ['clone']
     ports:
       - '8020:8020'
     environment:
