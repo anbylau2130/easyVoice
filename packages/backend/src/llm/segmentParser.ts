@@ -344,6 +344,8 @@ export async function planCharacterVoices({
           { role: 'user', content: prompt },
         ],
         response_format: { type: 'json_object' },
+        // 角色规划要求稳定：低温采样，同样书籍多次规划得到基本一致的角色名单
+        temperature: 0.2,
       })
       const content = response.choices[0]?.message?.content
       if (!content) throw new Error('LLM returned empty content')

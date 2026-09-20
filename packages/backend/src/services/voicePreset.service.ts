@@ -23,6 +23,16 @@ export const EXPRESS_AS_STYLES = [
   'gentle',
   'calm',
   'lyrical',
+  'whispering',
+  'chat',
+  'friendly',
+  'excited',
+  'embarrassed',
+  'depressed',
+  'newscast',
+  'poetry-reading',
+  'sports_commentary',
+  'sports_commentary_excited',
   'narration-professional',
   'narration-relaxed',
   'documentary-narration',
@@ -44,6 +54,8 @@ export interface VoicePreset {
   style?: string
   /** Male / Female（默认继承基础音色，供 AI 配音性别匹配） */
   gender?: string
+  /** 标记后不参与 AI 自动分配（特殊音色如方言/港台腔，仅供手动选用） */
+  excludeFromAI?: boolean
   createdAt: string
 }
 
@@ -86,6 +98,7 @@ export interface SaveVoicePresetInput {
   volume?: string
   style?: string
   gender?: string
+  excludeFromAI?: boolean
 }
 
 const clean = (v?: string) => (v || '').trim()
@@ -117,6 +130,7 @@ export async function saveVoicePreset(input: SaveVoicePresetInput): Promise<Voic
     ...(volume ? { volume } : {}),
     ...(style ? { style } : {}),
     gender: clean(input.gender) || undefined,
+    ...(input.excludeFromAI === true ? { excludeFromAI: true } : {}),
     createdAt: index[id]?.createdAt || new Date().toISOString(),
   }
   index[id] = entry

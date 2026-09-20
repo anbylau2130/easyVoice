@@ -104,9 +104,10 @@ const cnPlanTemplate = (voiceList: { Name: string; Gender?: string }[], sample: 
 2. 为每个角色标注 gender（female/male），必须与角色在文中的性别一致。
 3. 角色的 gender 必须与所选音色的性别一致：女性角色只能选 Gender 为 Female 的音色，男性角色只能选 Gender 为 Male 的音色。
 4. 同一角色只有一个音色；主要角色之间音色不要重复。
-5. 必须包含一个名为"旁白"的角色，用于叙述性文字。
-6. description 用一句**中文**概括角色性格与身份，必须使用中文，不得使用英文。
-7. 返回 JSON 格式。
+5. 角色上限：只列出**戏份最多的前 30 个角色**（有直接对白或戏份明显者优先）；没有对白或只出现一两次的人物不要单独列出，其台词一律并入"旁白"。全书角色不足 30 个时有多少列多少。
+6. 必须包含一个名为"旁白"的角色，用于叙述性文字。
+7. description 用一句**中文**概括角色性格与身份，必须使用中文，不得使用英文。
+8. 返回 JSON 格式。
 
 ### 声音配置
 ${JSON.stringify(voiceList, null, 2)}
@@ -128,9 +129,10 @@ Read the novel excerpt below, identify the main characters, and pick the most su
 2. Tag each character with gender ("female"/"male") matching the character in the text.
 3. The character's gender MUST match the voice's gender: female characters only pick voices with Gender=Female; male characters only Gender=Male.
 4. One voice per character; main characters should not share voices.
-5. Must include a character named "Narrator" for narration text.
-6. description: one sentence about the character's personality and role.
-7. Return JSON.
+5. Character cap: list only the **top 30 characters by dialogue share** (those with direct dialogue or significant presence); characters with no dialogue or only one or two appearances must NOT be listed — fold their lines into the Narrator. If the book has fewer than 30, list them all.
+6. Must include a character named "Narrator" for narration text.
+7. description: one sentence about the character's personality and role.
+8. Return JSON.
 
 ### Sound configuration
 ${JSON.stringify(voiceList, null, 2)}

@@ -339,9 +339,9 @@ class EdgeTTS {
     // 发送 SSML 请求
     try {
       const requestId = randomBytes(16).toString('hex')
-      // 情感风格：仅部分微软声音支持 express-as，不支持的声音由调用方过滤；
-      // 此处只要 style 非空就注入，普通文本不加包装保持兼容
-      const styleXml =
+      // 情感风格：mstts:express-as 必须是 <voice> 的直接子元素（包在 <prosody> 内会被微软端
+      // 以 SSML invalid 拒绝），语速/音调等 prosody 放在 express-as 内层
+      const styleOpen =
         this.style
           ? `<mstts:express-as style="${escapeSSML(this.style)}"${
               this.styleDegree ? ` styledegree="${this.styleDegree}"` : ''
@@ -352,11 +352,11 @@ class EdgeTTS {
         `X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nPath:ssml\r\n\r\n
         <speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="${this.lang}">
           <voice name="${this.voice}">
+            ${styleOpen}
             <prosody rate="${this.rate}" pitch="${this.pitch}" volume="${this.volume}">
-              ${styleXml}
               ${escapeSSML(text)}
-              ${styleClose}
             </prosody>
+            ${styleClose}
           </voice>
         </speak>`
       )

@@ -501,8 +501,9 @@ export async function planBookVoices(id: string): Promise<void> {
         }
         const { lang, voiceList } = await getLangConfig(sample || book.title)
         const customVoices = await listCustomVoices()
-        // 自定义 Edge 音色预设作为候选：并入 voiceList（带性别供 AI 匹配）并加入 extraVoices（不受语言过滤限制）
-        const presets = await listVoicePresets()
+        // 自定义 Edge 音色预设作为候选：并入 voiceList（带性别供 AI 匹配）并加入 extraVoices（不受语言过滤限制）。
+        // excludeFromAI 的特殊预设（方言/港台腔）不进入 AI 候选，仅供手动选用
+        const presets = (await listVoicePresets()).filter((p) => !p.excludeFromAI)
         const presetVoiceEntries = presets.map((p) => ({
           Name: p.id,
           Gender: p.gender || '',
