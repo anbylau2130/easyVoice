@@ -101,6 +101,19 @@ export function createOpenAIClient() {
     }
   }
 
+  /** 当前生效的模型名（供调用方按模型特性调整请求参数，如 GLM 关闭思考提速） */
+  function getModel(): string {
+    return currentConfig.model || MODEL_NAME || ''
+  }
+
+  /**
+   * 简单提取类任务（人物普查/角色分配）的提速参数：
+   * GLM 系列推理模型默认先"思考"，这类结构化提取不需要，关闭后单次调用耗时大幅下降。
+   */
+  function fastExtractFields(model: string): { thinking?: { type: 'disabled' } } {
+    return /glm/i.test(model) ? { thinking: { type: 'disabled' } } : {}
+  }
+
   /**
    * 动态更新配置
    * @param newConfig 新的配置参数
@@ -116,6 +129,8 @@ export function createOpenAIClient() {
   return {
     createChatCompletion,
     getModels,
+    getModel,
+    fastExtractFields,
     config,
   }
 }

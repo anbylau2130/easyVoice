@@ -219,38 +219,38 @@ export function getCharacterSegmentPrompt(lang = 'cn', mappingLines: string, tex
 
 // ===== 全书通读：人物普查 + 统计分配 =====
 
-const cnSurveyTemplate = (chunk: string) => `
+const cnSurveyTemplate = (chunk: string, roster: string[]) => `
 【人物普查】
 下面是小说中的某一章内容。请列出其中出现的所有**具名人物**（有姓名或固定称呼的角色；无名路人、代词一律不算）。
 每个人物返回：
-- name：人物名字
+- name：人物名字。**若该人物已在下方"已登记人物"中（含别称，如 宝玉=贾宝玉、凤姐=王熙凤），name 必须使用已登记的正式名**；只有全新人物才用新名字
 - gender：female / male（按文中描述判断，确实无法判断填 unknown）
-- dialog：该人物在此片段中的**对白句数**（整数，没有对白填 0）
+- dialog：该人物在本章中的**对白句数**（整数，没有对白填 0）
 - brief：两三个字的身份提示（如 书生/丫鬟/铁匠）
-只统计本片段中出现的人物；拿不准的也要列出（由后续汇总判断）。
-返回 JSON 格式：
+只统计本章中出现的人物。返回 JSON 格式：
 {"characters":[{"name":"张三","gender":"male","dialog":3,"brief":"书生"}]}
-
+${roster.length ? `\n### 已登记人物（正式名）\n${roster.join('、')}\n` : ''}
 ### 小说片段（本章内容）
 ${chunk}
 `
-const engSurveyTemplate = (chunk: string) => `
+const engSurveyTemplate = (chunk: string, roster: string[]) => `
 【Character survey】
 Below is a single chapter of a novel. List ALL named characters that appear (characters with a name or fixed title; unnamed passers-by and pronouns do not count).
 For each character return:
-- name: character name
+- name: character name. **If this character is already in the "Known characters" list below (including aliases, e.g. Lizzy = Elizabeth Bennet), "name" MUST be the registered formal name**; only brand-new characters get new names
 - gender: female / male (based on the text; use unknown if truly unclear)
-- dialog: number of dialogue lines this character speaks in this excerpt (integer, 0 if none)
+- dialog: number of dialogue lines this character speaks in this chapter (integer, 0 if none)
 - brief: 2-3 word identity hint (e.g. scholar / maid / blacksmith)
-Only count characters appearing in this excerpt; include uncertain ones (aggregation happens later).
-Return JSON: {"characters":[{"name":"John","gender":"male","dialog":3,"brief":"scholar"}]}
-
-### Novel excerpt
+Only count characters appearing in this chapter. Return JSON: {"characters":[{"name":"John","gender":"male","dialog":3,"brief":"scholar"}]}
+${roster.length ? `\n### Known characters (formal names)\n${roster.join(', ')}\n` : ''}
+### Chapter content
 ${chunk}
 `
 
-export function getCharacterSurveyPrompt(lang = 'cn', chunk: string) {
-  return lang === 'eng' ? engSurveyTemplate(chunk) : cnSurveyTemplate(chunk)
+export function getCharacterSurveyPrompt(lang = 'cn', chunk: string, roster: string[] = []) {
+  return lang === 'eng'
+    ? engSurveyTemplate(chunk, roster)
+    : cnSurveyTemplate(chunk, roster)
 }
 
 const cnAssignTemplate = (table: string, voiceList: { Name: string; Gender?: string }[]) => `

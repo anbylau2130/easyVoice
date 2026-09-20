@@ -17,7 +17,9 @@ interface ChatCompletionRequest {
   max_tokens?: number;
   top_p?: number;
   stream?: boolean;
-  response_format?: { type: string }
+  response_format?: { type: string };
+  /** GLM 系列思考开关（如 { type: 'disabled' }），简单提取任务关闭思考可大幅提速 */
+  thinking?: { type: 'enabled' | 'disabled' };
 }
 
 // Chat Completion 响应格式

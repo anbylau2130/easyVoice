@@ -244,11 +244,13 @@ export async function planVoicesHandler(req: Request, res: Response, next: NextF
 export async function stopPlanVoicesHandler(req: Request, res: Response) {
   try {
     const accepted = stopPlanVoices(req.params.id)
-    if (!accepted) {
-      res.status(400).json({ success: false, code: 400, message: '当前没有正在进行的规划' })
-      return
-    }
-    res.json({ success: true, code: 200, message: '正在停止规划，当前章节读完即生效' })
+    res.json({
+      success: true,
+      code: 200,
+      message: accepted
+        ? '正在停止规划，当前章节读完即生效'
+        : '规划未在进行（可能因服务重启中断），已清理遗留的规划状态',
+    })
   } catch (error) {
     res.status(400).json({ success: false, code: 400, message: (error as Error).message })
   }

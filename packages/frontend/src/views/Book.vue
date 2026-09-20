@@ -556,6 +556,9 @@
         </div>
         <el-table :data="editingVoices" size="small" max-height="260" row-key="character">
           <el-table-column prop="character" label="角色" width="120" />
+          <el-table-column label="对白" width="70">
+            <template #default="{ row }">{{ row.dialog ?? 0 }} 句</template>
+          </el-table-column>
           <el-table-column label="性别" width="70">
             <template #default="{ row }">
               {{ genderText(row.gender) }}
@@ -1116,9 +1119,22 @@ function genderText(gender?: string) {
 watch(
   () => bookDetail.value?.characterVoices,
   (voices) => {
-    if (voices && !voicesDirty.value) {
+    if (!voices) return
+    if (!voicesDirty.value) {
       editingVoices.value = voices.map((c) => ({ ...c }))
+      return
     }
+    // 规划期间用户已改过音色（脏状态）：只追加新发现的角色、同步对白数，
+    // 不覆盖用户已调整的音色/描述
+    const known = new Set(editingVoices.value.map((v) => v.character))
+    const additions = voices
+      .filter((c) => !known.has(c.character))
+      .map((c) => ({ ...c }))
+    for (const v of editingVoices.value) {
+      const latest = voices.find((c) => c.character === v.character)
+      if (latest) v.dialog = latest.dialog
+    }
+    if (additions.length) editingVoices.value = [...editingVoices.value, ...additions]
   },
   { immediate: true }
 )
@@ -1128,7 +1144,7 @@ async function handlePlanVoices() {
   planningLoading.value = true
   try {
     await planVoices(bookId.value)
-    ElMessage.success('已开始规划角色音色，AI 通读全书后给出映射（约 1-3 分钟）')
+    ElMessage.success('已开始逐章通读全书，发现的角色会实时出现在下方角色表中，可随时调整音色')
   } catch (error) {
     ElMessage.error((error as Error).message)
   } finally {

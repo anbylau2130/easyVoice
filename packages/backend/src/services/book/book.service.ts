@@ -5,7 +5,7 @@ import { AUDIO_DIR } from '../../config'
 import { logger } from '../../utils/logger'
 import { asyncSleep, ensureDir, getLangConfig, readJson } from '../../utils'
 import { generateTTS, TtsProgressCallback } from '../tts.service'
-import { planCharacterVoices, surveyBookCharacters, planCharactersFromSurvey, CharacterVoice } from '../../llm/segmentParser'
+import { surveyBookCharacters, CharacterStat, CharacterVoice } from '../../llm/segmentParser'
 import { listVoicePresets } from '../voicePreset.service'
 import { listCustomVoices } from '../customVoice.service'
 import type { ParsedChapter } from './chapter.service'
@@ -455,6 +455,17 @@ export async function initBookService(): Promise<void> {
     await saveBook(book)
     logger.info(`Book ${summary.id} was interrupted, marked as paused for resume`)
   }
+  // 清理遗留的"规划中"标志：规划任务在内存中，服务重启后不可能还在进行
+  for (const summary of books) {
+    if (!summary.planning) continue
+    const book = await loadBook(summary.id)
+    if (!book?.planning) continue
+    book.planning = false
+    book.planningDetail = undefined
+    book.planningStartedAt = undefined
+    await saveBook(book)
+    logger.info(`Book ${summary.id} had stale planning flag (server restarted), cleared`)
+  }
 }
 
 export function chapterFilePath(id: string, index: number, ext: string): string {
@@ -502,10 +513,25 @@ export async function updateChapterSelection(id: string, indexes: number[]): Pro
  * 独立的角色音色规划：AI 通读书籍样本，按角色性格分配音色（异步执行，前端轮询 planning 状态）。
  * 规划完成后用户可在角色音色表中试听/编辑，确认后再开始生成有声书。
  */
-/** 请求停止规划：在下一章边界生效（当前章会读完）。返回是否已受理 */
+/** 请求停止规划：在下一章边界生效（当前章会读完）。
+ *  若规划任务已不存在但书上仍挂着 planning 标志（如服务重启导致的中断），
+ *  直接清理遗留状态并按已受理返回，保证"停止"按钮永远能把书解卡。 */
 export function stopPlanVoices(id: string): boolean {
   if (!BOOK_ID_PATTERN.test(id)) throw new Error('无效的有声书 ID')
-  if (!planningIds.has(id)) return false
+  if (!planningIds.has(id)) {
+    // 兜底：清理遗留标志（服务重启/任务丢失导致的僵尸"规划中"状态）
+    ;(async () => {
+      const book = await loadBook(id)
+      if (book?.planning) {
+        book.planning = false
+        book.planningDetail = undefined
+        book.planningStartedAt = undefined
+        await saveBook(book)
+        logger.info(`Cleared stale planning flag for book ${id}`)
+      }
+    })()
+    return false
+  }
   planningCanceled.add(id)
   logger.info(`Character planning stop requested for book ${id}`)
   return true
@@ -526,15 +552,19 @@ export async function planBookVoices(id: string): Promise<void> {
   planningCanceled.delete(id)
   await saveBook(book)
     void (async () => {
-      // 进度描述实时落盘，前端轮询 book.planningDetail 展示
-      const setDetail = (detail: string) => {
-        book.planningDetail = detail
-        saveBook(book).catch(() => {})
+      // 长流程期间角色表/标志位可能被并发更新（用户手动改音色等），
+      // 所有写入都必须"重读最新书 → 修改 → 保存"，禁止用外层过期对象直接覆盖
+      const update = async (mutate: (b: Book) => void) => {
+        const fresh = await loadBook(id)
+        if (!fresh) return
+        mutate(fresh)
+        await saveBook(fresh)
       }
+      const setDetail = (detail: string) => update((b) => { b.planningDetail = detail })
       try {
-        // 通读全书：逐章调用 AI 做人物普查（串行、进度按章推进），再汇总取前 30 分配音色。
+        // 通读全书：逐章调用 AI 做人物普查（串行、进度按章推进）。
         // 每章一次调用保证进度可见；章与章之间有间隔与 429 退避，避免限速失败
-        setDetail('正在读取全书章节…')
+        await setDetail('正在读取全书章节…')
         const chapterTexts = book.chapters.map((chapter, i) => ({
           content: '',
           label: `第 ${i + 1}/${book.chapters.length} 章`,
@@ -542,7 +572,6 @@ export async function planBookVoices(id: string): Promise<void> {
         for (let i = 0; i < book.chapters.length; i++) {
           chapterTexts[i].content = await readChapterContent(book.id, book.chapters[i].index)
         }
-        const totalChars = chapterTexts.reduce((sum, t) => sum + (t.content?.length || 0), 0)
         const langProbe =
           chapterTexts.find((t) => t.content && t.content.length > 100)?.content.slice(0, 2000) ||
           book.title
@@ -558,52 +587,113 @@ export async function planBookVoices(id: string): Promise<void> {
           VoicePersonalities: [p.voice],
         }))
         const candidateVoiceList = [...voiceList, ...presetVoiceEntries]
-        const extraVoices = [
-          ...customVoices.map((v) => v.voice),
-          ...presets.map((p) => p.id),
-        ]
         // 用户在创建时选择的音色作为旁白基准
         const narratorBase = book.params.voice
+        // 按性别轮转的默认音色：新角色登记时立即预分配，用户可随时在角色表里改。
+        // 音色池优先 zh-CN（用户要求角色一律中文音色），无匹配性别时回落到全部 zh-CN
+        const voiceCursor = new Map<string, number>()
+        const pickVoice = (gender?: string) => {
+          const zh = candidateVoiceList.filter((v) => v.Name.startsWith('zh-CN'))
+          const base = zh.length ? zh : candidateVoiceList
+          const pool = base.filter((v) => {
+            if (!gender || gender === 'unknown') return true
+            return gender === 'female' ? v.Gender === 'Female' : v.Gender === 'Male'
+          })
+          const candidates = pool.length ? pool : base
+          const key = gender || 'any'
+          const i = voiceCursor.get(key) || 0
+          voiceCursor.set(key, i + 1)
+          return candidates[i % candidates.length].Name
+        }
+        // 单章普查结果增量合并进"最新"的角色表：先重读书状态，
+        // 保证用户在规划期间手动修改/删除的行不被覆盖
+        const applyStats = async (stats: CharacterStat[]): Promise<number> => {
+          const fresh = await loadBook(id)
+          if (!fresh) return 0
+          const list = fresh.characterVoices || []
+          // 旁白固定使用用户基准音色，始终存在
+          if (!list.some((c) => c.character === '旁白')) {
+            list.push({ character: '旁白', voice: narratorBase, dialog: 0 })
+          }
+          for (const s of stats) {
+            if (s.name === '旁白') continue
+            let entry = list.find(
+              (c) =>
+                c.character === s.name ||
+                (c.character.length >= 2 &&
+                  s.name.length >= 2 &&
+                  (c.character.includes(s.name) || s.name.includes(c.character)))
+            )
+            if (!entry) {
+              const gender = s.gender === 'unknown' ? undefined : s.gender
+              entry = {
+                character: s.name,
+                voice: pickVoice(gender),
+                gender,
+                description: s.brief,
+                dialog: 0,
+              }
+              list.push(entry)
+              logger.info(`New character discovered: ${s.name} -> ${entry.voice}`)
+            } else if (!entry.description && s.brief) {
+              entry.description = s.brief
+            }
+            entry.dialog = (entry.dialog || 0) + s.dialog
+          }
+          // 按对白数加权排序：戏份多的角色排前面
+          list.sort((a, b) => (b.dialog || 0) - (a.dialog || 0))
+          fresh.characterVoices = list
+          await saveBook(fresh)
+          return list.length
+        }
+        // 旁白固定使用用户基准音色，始终存在
+        await applyStats([])
+        let discovered = 0
+        let lastLabel = ''
         const stats = await surveyBookCharacters({
           texts: chapterTexts,
           lang,
-          onProgress: (label) => setDetail(label),
+          onProgress: (label) => {
+            lastLabel = label
+            void setDetail(`${label} · 已收录 ${discovered} 个角色`)
+          },
+          onStats: async (chapterStats) => {
+            const count = await applyStats(chapterStats)
+            discovered = count
+            await setDetail(`${lastLabel} · 已收录 ${count} 个角色`)
+          },
+          getRosterNames: async () =>
+            (await loadBook(id))?.characterVoices?.map((c) => c.character) || [],
           shouldStop: () => planningCanceled.has(id),
         })
-        // 用户停止：跳过音色分配，恢复为可重新规划状态
+        void stats
+        // 用户停止：保留已收录的角色（含已预分配的音色），恢复为可重新规划状态
         if (planningCanceled.has(id)) {
-          book.message = '角色音色规划已手动停止，可重新规划或手动配置音色'
+          await update((b) => {
+            b.message = '规划已手动停止，已收录的角色已保留，可继续编辑音色或重新规划'
+          })
           return
         }
-        setDetail('全书通读完成，正在分配角色音色…')
-        book.characterVoices = await planCharactersFromSurvey({
-          lang,
-          voiceList: candidateVoiceList,
-          stats,
-          topN: 30,
-          extraVoices,
-          narratorVoice: narratorBase,
+        await update((b) => {
+          b.planningDetail = `全书通读完成，共收录 ${discovered} 个角色音色（可在角色表中继续调整）`
         })
-        // 分配期间也可能收到停止请求：丢弃本次分配结果
-        if (planningCanceled.has(id)) {
-          book.message = '角色音色规划已手动停止，可重新规划或手动配置音色'
-          book.characterVoices = undefined
-          return
-        }
         logger.info(
-          `Character voices planned for book ${id}: ${book.characterVoices
-            .map((c) => c.character)
+          `Character voices planned for book ${id}: ${(await loadBook(id))?.characterVoices
+            ?.map((c) => c.character)
             .join(', ')}`
         )
       } catch (err) {
-        book.message = `角色音色规划失败：${(err as Error).message}`
         logger.error(`Character planning failed for book ${id}: ${(err as Error).message}`)
+        await update((b) => {
+          b.message = `角色音色规划失败：${(err as Error).message}`
+        })
       } finally {
-        book.planning = false
-        book.planningDetail = undefined
-        book.planningStartedAt = undefined
+        await update((b) => {
+          b.planning = false
+          b.planningDetail = undefined
+          b.planningStartedAt = undefined
+        })
         planningCanceled.delete(id)
-        await saveBook(book).catch(() => {})
         planningIds.delete(id)
       }
     })()

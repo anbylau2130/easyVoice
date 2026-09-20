@@ -36,6 +36,8 @@ export interface CharacterVoice {
   /** 角色性别 female/male（由规划阶段根据文中角色判定） */
   gender?: string
   description?: string
+  /** 全书对白句数（权重：排序与取舍依据） */
+  dialog?: number
 }
 
 const SEGMENT_ARRAY_KEYS = ['segments', 'result', 'data', 'list']
@@ -351,6 +353,8 @@ export async function surveyBookCharacters({
   chunkSize = 30000,
   concurrency = 1,
   onProgress,
+  onStats,
+  getRosterNames,
   shouldStop,
 }: {
   /** 章节正文列表，label 为章节显示名（如"第 12/60 章"） */
@@ -359,6 +363,10 @@ export async function surveyBookCharacters({
   chunkSize?: number
   concurrency?: number
   onProgress?: (label: string) => void
+  /** 每章普查成功后回调该章的人物统计（供上层增量合并进角色表） */
+  onStats?: (stats: CharacterStat[]) => void
+  /** 返回当前已登记人物正式名列表（普查 prompt 用于别名归并到正式名） */
+  getRosterNames?: () => Promise<string[]> | string[]
   /** 返回 true 时在下一章边界停止通读（当前章会读完），返回已收集的部分统计 */
   shouldStop?: () => boolean
 }): Promise<CharacterStat[]> {
@@ -374,52 +382,66 @@ export async function surveyBookCharacters({
         return [] as CharacterStat[]
       }
       onProgress?.(`正在通读 ${chunk.label}`)
-      const stats = await safeRunWithRetry(
-        async () => {
-          const response = await openai.createChatCompletion({
-            messages: [
-              { role: 'system', content: 'You are a helpful assistant. And you can return valid json object' },
-              { role: 'user', content: getCharacterSurveyPrompt(lang, chunk.text) },
-            ],
-            temperature: 0.2,
-            response_format: { type: 'json_object' },
-          })
-          const content = response.choices[0]?.message?.content
-          if (!content) throw new Error('LLM returned empty content')
-          const parsed = JSON.parse(content)
-          const arr = extractSegmentArray(parsed)
-          if (!arr?.length) throw new Error('survey returned no entries')
-          const stats: CharacterStat[] = []
-          for (const item of arr) {
-            const name = typeof item.name === 'string' ? item.name.trim() : ''
-            if (!name || name.length > 20) continue
-            const gender =
-              item.gender === 'female' ? 'female' : item.gender === 'male' ? 'male' : 'unknown'
-            const dialog = Number.isFinite(Number(item.dialog)) ? Math.max(0, Number(item.dialog)) : 0
-            stats.push({
-              name,
-              gender,
-              dialog,
-              brief: typeof item.brief === 'string' ? item.brief.slice(0, 12) : undefined,
+      const rosterNames = getRosterNames ? await getRosterNames() : []
+      // 单章抽取：先用快速模式（GLM 关思考）；若整章抽不出任何人物，
+      // 说明快速模式失效或该章较复杂，自动改用深度模式（开启思考）重跑一次
+      const extractChunk = async (thinking: boolean) =>
+        await safeRunWithRetry(
+          async () => {
+            const response = await openai.createChatCompletion({
+              messages: [
+                { role: 'system', content: 'You are a helpful assistant. And you can return valid json object' },
+                { role: 'user', content: getCharacterSurveyPrompt(lang, chunk.text, rosterNames) },
+              ],
+              temperature: 0.2,
+              max_tokens: 2000,
+              ...(thinking ? {} : openai.fastExtractFields(openai.getModel())),
+              response_format: { type: 'json_object' },
             })
-          }
-          return stats
-        },
-        {
-          retries: 3,
-          baseDelayMs: 5000,
-          onError: (err, attempt) => {
-            logger.warn(
-              `Character survey chunk ${idx + 1} attempt ${attempt}: ${(err as Error).message}`
-            )
-            // 重试也同步到进度行，让前端能看到"卡住"的原因（限速退避/超时重试）
-            onProgress?.(
-              `（${chunk.label}）第 ${attempt} 次尝试失败（${(err as Error).message.slice(0, 60)}），稍后自动重试…`
-            )
+            const content = response.choices[0]?.message?.content
+            if (!content) throw new Error('LLM returned empty content')
+            const parsed = JSON.parse(content)
+            const arr = extractSegmentArray(parsed)
+            if (!arr?.length) throw new Error('survey returned no entries')
+            const stats: CharacterStat[] = []
+            for (const item of arr) {
+              const name = typeof item.name === 'string' ? item.name.trim() : ''
+              if (!name || name.length > 20) continue
+              const gender =
+                item.gender === 'female' ? 'female' : item.gender === 'male' ? 'male' : 'unknown'
+              const dialog = Number.isFinite(Number(item.dialog)) ? Math.max(0, Number(item.dialog)) : 0
+              stats.push({
+                name,
+                gender,
+                dialog,
+                brief: typeof item.brief === 'string' ? item.brief.slice(0, 12) : undefined,
+              })
+            }
+            return stats
           },
-        }
-      )
-      // 块间留出间隔，降低触发服务端限速的概率
+          {
+            retries: 3,
+            baseDelayMs: 5000,
+            onError: (err, attempt) => {
+              logger.warn(
+                `Character survey chunk ${idx + 1} attempt ${attempt}: ${(err as Error).message}`
+              )
+              // 重试也同步到进度行，让前端能看到"卡住"的原因（限速退避/超时重试）
+              onProgress?.(
+                `（${chunk.label}）第 ${attempt} 次尝试失败（${(err as Error).message.slice(0, 60)}），稍后自动重试…`
+              )
+            },
+          }
+        )
+      let stats = await extractChunk(false)
+      if (!stats.length) {
+        logger.info(`Chunk ${idx + 1} empty in fast mode, retrying with thinking enabled`)
+        onProgress?.(`（${chunk.label}）快速抽取为空，启用深度模式重试…`)
+        stats = await extractChunk(true)
+      }
+      // 每章普查成功后立即回调，上层把新角色增量合并进角色表
+      if (stats.length) onStats?.(stats)
+      // 章间留出间隔，降低触发服务端限速的概率
       await asyncSleep(2000)
       return stats
     } catch (err) {
@@ -539,6 +561,8 @@ export async function planCharactersFromSurvey({
           { role: 'user', content: prompt },
         ],
         temperature: 0.2,
+        // 音色分配同样是结构化提取：关闭推理模型思考提速
+        ...openai.fastExtractFields(openai.getModel()),
         response_format: { type: 'json_object' },
       })
       const content = response.choices[0]?.message?.content

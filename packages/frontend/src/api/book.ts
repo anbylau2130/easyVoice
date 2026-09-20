@@ -51,6 +51,8 @@ export interface CharacterVoice {
   /** 角色性别 female/male（规划阶段根据文中角色判定） */
   gender?: string
   description?: string
+  /** 全书对白句数（权重：列表排序依据） */
+  dialog?: number
 }
 
 export interface BookDetail {
