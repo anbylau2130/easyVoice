@@ -1,2 +1,7 @@
 packages:
   - 'packages/*'
+# pnpm v10 默认不执行依赖安装脚本，这里显式放行需要的：
+# ffmpeg-static 的 postinstall 下载 ffmpeg 二进制（Docker 运行时用系统 ffmpeg，
+# 但安装阶段仍需脚本成功）；报 ERR_PNPM_IGNORED_BUILDS 时把对应包名加到这里
+onlyBuiltDependencies:
+  - ffmpeg-static
