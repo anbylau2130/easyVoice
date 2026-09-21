@@ -27,3 +27,5 @@ xtts-api-server.tar
 # RVC 检索特征文件超大（数百 MB），超过 GitHub 100MB 单文件限制，不入库；
 # .pth 模型主体照常提交，index 可从模型来源处（HuggingFace 等）重新下载
 rvc-models/**/*.index
+# Docker 目录映射的持久化数据（生成的音频、模型权重等），不入库
+docker-data/
