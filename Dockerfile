@@ -30,6 +30,8 @@ COPY --from=builder /app/packages/backend/package.json /app/package.json
 # workspace 文件随拷：声明 ffmpeg-static 脚本忽略策略（配合下方 --ignore-scripts）
 COPY --from=builder /app/pnpm-workspace.yaml /app/pnpm-workspace.yaml
 COPY --from=builder /app/pnpm-lock.yaml /app/pnpm-lock.yaml
+COPY --from=builder /app/packages/backend/dist /app/dist
+COPY --from=builder /app/packages/backend/public /app/public
 
 # 运行时使用系统 ffmpeg（FFMPEG_PATH），无需 ffmpeg-static 的下载脚本
 RUN pnpm install --prod --ignore-scripts
