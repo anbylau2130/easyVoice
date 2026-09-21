@@ -317,6 +317,15 @@
               <el-radio value="llm">AI 智能配音</el-radio>
             </el-radio-group>
           </div>
+          <div v-if="voiceMode === 'llm'" class="config-item">
+            <label>配音引擎</label>
+            <el-select v-model="voiceEngine">
+              <el-option label="Edge 预设（免费，推荐）" value="edge" />
+              <el-option label="OpenVoice 换声（参考音色，需 vc 服务）" value="openvoice" />
+              <el-option label="RVC 换声（需已训练模型，相似度最高）" value="rvc" />
+              <el-option label="XTTS 声音克隆（直接用参考声音，较慢）" value="clone" />
+            </el-select>
+          </div>
           <div v-if="voiceMode === 'preset'" class="config-item sliders">
             <label>语速 {{ formatPercent(rate) }}</label>
             <el-slider v-model="rate" :min="-50" :max="100" :step="10" />
@@ -400,6 +409,9 @@
       <div class="progress-head" v-if="bookDetail">
         <el-tag :type="bookStatusType(bookDetail.status)" size="large">
           {{ bookStatusText(bookDetail.status) }}
+        </el-tag>
+        <el-tag v-if="bookDetail.params.useLLM" type="info" effect="plain">
+          {{ engineLabel }}
         </el-tag>
         <el-progress
           class="progress-bar"
@@ -552,7 +564,21 @@
 
       <section v-if="bookDetail?.characterVoices?.length" class="character-card">
         <div class="character-head">
-          <h3>🎭 角色音色表（全书统一）</h3>
+          <h3>
+            🎭 角色音色表（全书统一
+            <template v-if="characterSearch.trim()">
+              匹配 {{ filteredEditingVoices.length }}/{{ speakingRows.length }} 人）
+            </template>
+            <template v-else>共 {{ speakingRows.length }} 个有对白的角色）</template>
+          </h3>
+          <el-input
+            v-model="characterSearch"
+            class="character-search"
+            size="small"
+            clearable
+            placeholder="搜索角色 / 称呼 / 性格"
+            :prefix-icon="Search"
+          />
           <el-button
             type="primary"
             size="small"
@@ -563,10 +589,12 @@
             保存音色修改
           </el-button>
         </div>
-        <el-table :data="editingVoices" size="small" max-height="260" row-key="character">
+        <el-table :data="filteredEditingVoices" size="small" max-height="260" row-key="character">
           <el-table-column prop="character" label="角色" width="120" />
           <el-table-column label="对白" width="70">
-            <template #default="{ row }">{{ row.dialog ?? 0 }} 句</template>
+            <template #default="{ row }">
+              {{ row.character === '旁白' ? '—' : `${row.dialog ?? 0} 句` }}
+            </template>
           </el-table-column>
           <el-table-column label="性别" width="70">
             <template #default="{ row }">
@@ -595,16 +623,39 @@
               <div v-if="voiceGenderMismatch(row)" class="gender-warn-text">⚠ 与角色性别不符</div>
             </template>
           </el-table-column>
-          <el-table-column label="试听" width="90">
+          <el-table-column v-if="isVcEngineBook" label="换声源" min-width="150">
+            <template #default="{ row }">
+              <el-select
+                v-model="row.vcRef"
+                size="small"
+                clearable
+                filterable
+                :placeholder="vcRefOptions.length ? '选择换声源' : '无可换声源'"
+                @change="voicesDirty = true"
+              >
+                <el-option v-for="name in vcRefOptions" :key="name" :label="name" :value="name" />
+              </el-select>
+            </template>
+          </el-table-column>
+          <el-table-column label="试听" width="130">
             <template #default="{ row }">
               <el-button
                 type="primary"
                 link
                 size="small"
-                :disabled="previewLoadingCharacter === row.character"
+                :disabled="previewLoadingCharacter === row.character || downloadingCharacter === row.character"
                 @click="previewVoice(row)"
               >
                 {{ previewLoadingCharacter === row.character ? '合成中' : '▶ 试听' }}
+              </el-button>
+              <el-button
+                type="success"
+                link
+                size="small"
+                :disabled="previewLoadingCharacter === row.character || downloadingCharacter === row.character"
+                @click="downloadPreview(row)"
+              >
+                {{ downloadingCharacter === row.character ? '合成中' : '下载' }}
               </el-button>
             </template>
           </el-table-column>
@@ -706,10 +757,12 @@ import {
   listVoicePresets,
   previewPresetVoice,
   saveVoicePreset,
+  getVcInfo,
   type CustomVoice,
   type VoicePreset,
+  type VcInfo,
 } from '@/api/voices'
-import { LoaderCircle } from 'lucide-vue-next'
+import { LoaderCircle, Search } from 'lucide-vue-next'
 import {
   chapterAudioUrl,
   chapterSrtUrl,
@@ -731,6 +784,7 @@ import {
   type ChapterStatus,
   type CharacterVoice,
   type ParsedChapter,
+  type VoiceEngine,
 } from '@/api/book'
 import { mapZHVoiceName } from '@/utils'
 
@@ -783,6 +837,33 @@ const savingLlm = ref(false)
 const planningLoading = ref(false)
 // 音色分配方式：match=按性格匹配已配置预设；generate=AI 为每个角色生成专属预设
 const voiceAssignMode = ref<'match' | 'generate'>('generate')
+// 配音引擎：edge=纯 Edge 预设 / clone=XTTS 克隆 / openvoice / rvc（创建时选定）
+const voiceEngine = ref<VoiceEngine>('edge')
+const vcInfo = ref<VcInfo | null>(null)
+/** 换声引擎（openvoice/rvc）下角色表的「换声源」下拉选项 */
+const vcRefOptions = computed(() => {
+  if (!vcInfo.value) return []
+  return voiceEngine.value === 'rvc'
+    ? vcInfo.value.models.map((m) => m.name)
+    : vcInfo.value.references
+})
+async function ensureVcInfo() {
+  if (vcInfo.value) return
+  try {
+    vcInfo.value = await getVcInfo()
+  } catch {
+    vcInfo.value = { references: [], models: [] }
+  }
+}
+/** 当前书是否使用换声引擎（角色表显示「换声源」列） */
+const isVcEngineBook = computed(() => voiceEngine.value === 'openvoice' || voiceEngine.value === 'rvc')
+const engineLabels: Record<VoiceEngine, string> = {
+  edge: 'Edge 预设',
+  clone: 'XTTS 克隆',
+  openvoice: 'OpenVoice 换声',
+  rvc: 'RVC 换声',
+}
+const engineLabel = computed(() => engineLabels[voiceEngine.value] || 'Edge 预设')
 const stoppingPlan = ref(false)
 async function handleStopPlan() {
   if (!bookId.value) return
@@ -797,9 +878,69 @@ async function handleStopPlan() {
   }
 }
 const editingVoices = ref<CharacterVoice[]>([])
+// 角色较多（30+），支持按角色名/称呼/性格描述过滤
+const characterSearch = ref('')
+// 无对白的角色不参与配音配置，默认不显示（旁白除外）；
+// 旧版规划数据没有对白统计（全为 0），此时保留全部避免整表清空
+const hasDialogData = computed(() =>
+  editingVoices.value.some((c) => c.character !== '旁白' && (c.dialog || 0) > 0)
+)
+const speakingRows = computed(() => {
+  const narrators = editingVoices.value.filter((c) => c.character === '旁白')
+  // 其余按对白数降序：戏份多的角色排前面（稳定排序，同数保持原顺序）
+  const others = editingVoices.value
+    .filter((c) => c.character !== '旁白' && (!hasDialogData.value || (c.dialog || 0) > 0))
+    .sort((a, b) => (b.dialog || 0) - (a.dialog || 0))
+  return [...narrators, ...others]
+})
+const filteredEditingVoices = computed(() => {
+  // 旁白置顶：叙述占全书大部分篇幅，固定第一行便于确认基准音色
+  const rows = speakingRows.value
+  const kw = characterSearch.value.trim().toLowerCase()
+  if (!kw) return rows
+  return rows.filter((c) =>
+    [c.character, ...(c.aliases || []), c.description || ''].join(' ').toLowerCase().includes(kw)
+  )
+})
 const voicesDirty = ref(false)
 const savingVoices = ref(false)
 const previewLoadingCharacter = ref('')
+/** 试听下载：与试听同链路合成/换声，由浏览器保存为文件（服务端不落盘） */
+const downloadingCharacter = ref('')
+async function downloadPreview(row: CharacterVoice) {
+  if (!bookId.value) return
+  downloadingCharacter.value = row.character
+  try {
+    if (row.voice !== savedVoiceOf(row.character) || (row.vcRef || '') !== savedVcRefOf(row.character)) {
+      const ok = await handleSaveVoices(true)
+      if (!ok) return
+    }
+    const res = await fetch(characterPreviewUrl(bookId.value, row.character, true), {
+      signal: AbortSignal.timeout(120_000),
+    })
+    if (!res.ok) {
+      let message = `下载失败（HTTP ${res.status}）`
+      try {
+        const err = await res.json()
+        if (err?.message) message = err.message
+      } catch {
+        // 非 JSON 错误体
+      }
+      throw new Error(message)
+    }
+    const blob = await res.blob()
+    const isWav = blob.type.includes('wav')
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `试听-${row.character}.${isWav ? 'wav' : 'mp3'}`
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000)
+  } catch (error) {
+    ElMessage.error((error as Error).message || '下载失败，请稍后重试')
+  } finally {
+    downloadingCharacter.value = ''
+  }
+}
 let previewAudio: HTMLAudioElement | null = null
 
 // 自定义音色（声音克隆）
@@ -1114,6 +1255,10 @@ function savedVoiceOf(character: string): string | undefined {
   return bookDetail.value?.characterVoices?.find((c) => c.character === character)?.voice
 }
 
+function savedVcRefOf(character: string): string {
+  return bookDetail.value?.characterVoices?.find((c) => c.character === character)?.vcRef || ''
+}
+
 function voiceGenderMismatch(row: { gender?: string; voice: string }): boolean {
   if (!row.gender) return false
   const voiceGender = voiceList.value.find((v) => v.Name === row.voice)?.Gender
@@ -1169,7 +1314,7 @@ async function handleSaveVoices(silent = false): Promise<boolean> {
   try {
     await saveCharacterVoices(
       bookId.value,
-      editingVoices.value.map((v) => ({ character: v.character, voice: v.voice }))
+      editingVoices.value.map((v) => ({ character: v.character, voice: v.voice, vcRef: v.vcRef }))
     )
     voicesDirty.value = false
     if (!silent) ElMessage.success('角色音色已更新')
@@ -1187,8 +1332,8 @@ async function previewVoice(row: CharacterVoice) {
   if (!bookId.value) return
   previewLoadingCharacter.value = row.character
   try {
-    // 若该行音色有未保存的修改，先静默保存，确保试听的是新音色
-    if (row.voice !== savedVoiceOf(row.character)) {
+    // 若该行音色或换声源有未保存的修改，先静默保存，确保试听的就是最终效果
+    if (row.voice !== savedVoiceOf(row.character) || (row.vcRef || '') !== savedVcRefOf(row.character)) {
       const ok = await handleSaveVoices(true)
       if (!ok) return
     }
@@ -1489,6 +1634,7 @@ async function handleCreate() {
         pitch: formatHz(pitch.value),
         volume: formatPercent(volume.value),
         useLLM: voiceMode.value === 'llm',
+        voiceEngine: voiceMode.value === 'llm' ? voiceEngine.value : 'edge',
       },
       // AI 模式需先规划角色音色并确认，不自动开始生成
       autostart: voiceMode.value === 'preset',
@@ -1508,6 +1654,11 @@ async function openBook(id: string) {
   try {
     bookDetail.value = await getBook(id)
     bookId.value = id
+    // 同步该书的配音引擎；换声引擎需拉取换声源列表（参考音频 / RVC 模型）
+    voiceEngine.value = bookDetail.value.params.voiceEngine || 'edge'
+    if (voiceEngine.value === 'openvoice' || voiceEngine.value === 'rvc') {
+      void ensureVcInfo()
+    }
     // 记住最后打开的书：页面刷新后自动恢复到详情视图，规划/生成进度不丢
     localStorage.setItem(LAST_BOOK_KEY, id)
     startPolling()
@@ -1861,6 +2012,11 @@ onBeforeUnmount(() => {
     h3 {
       margin: 0;
       font-size: 15px;
+    }
+    .character-search {
+      width: 200px;
+      margin-left: auto;
+      margin-right: 10px;
     }
   }
   .voice-name {

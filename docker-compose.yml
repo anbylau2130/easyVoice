@@ -43,6 +43,10 @@ services:
       # 声音克隆服务地址：默认指向 compose 内的 xtts-server；
       # 独立部署克隆服务时在 .env 覆盖（如 TTS_CLONE_URL=http://192.168.1.10:8020）
       - TTS_CLONE_URL=${TTS_CLONE_URL:-http://xtts-server:8020}
+      # 音色转换服务地址（openvoice 换声引擎）：默认指向 compose 内的 vc-server
+      - VC_SERVER_URL=${VC_SERVER_URL:-http://vc-server:9090}
+      # RVC 转换服务地址（rvc 换声引擎）：默认指向 compose 内的 rvc-server
+      - RVC_SERVER_URL=${RVC_SERVER_URL:-http://rvc-server:9091}
       # 克隆服务容器内看到的说话人目录（参考 wav 所在位置，随部署方式调整）
       - TTS_CLONE_SPEAKERS_DIR=${TTS_CLONE_SPEAKERS_DIR:-/app/speakers/custom-voices}
       # AI 配音规划用 LLM（也可在页面「AI 模型配置」卡片填写，优先级更高）
@@ -90,7 +94,44 @@ services:
       # 说话人参考目录：挂载整个 audio 卷，参考 wav 在 /app/speakers/custom-voices/
       - easyvoice-audio:/app/speakers
 
+  # 音色转换服务（可选）：加 --profile vc 启用。OpenVoice2 零样本换声，
+  # 用 voices/ 里的参考音频对 Edge-TTS 合成结果做频谱重建（快，相似度中等）
+  vc-server:
+    build: ./vc-server
+    container_name: vc-server
+    restart: unless-stopped
+    profiles: ['vc']
+    ports:
+      - '9090:9090'
+    environment:
+      - HF_ENDPOINT=https://hf-mirror.com
+    volumes:
+      # 参考音色：宿主机 voices/ 目录的 wav（文件名即参考名）
+      - ./voices:/app/references:ro
+      # 转换器权重持久化（首次启动从 hf-mirror 下载）
+      - vc-checkpoints:/app/checkpoints_v2
+
+  # RVC v2 音色转换服务（可选）：加 --profile rvc 启用。
+  # 独立于 vc-server 部署（RVC 依赖链较老，隔离避免影响 OpenVoice 服务）。
+  # 模型放置：宿主机 rvc-models/<模型名>/xx.pth（+ 可选 xx.index），社区模型或自训均可
+  rvc-server:
+    build: ./rvc-server
+    container_name: rvc-server
+    restart: unless-stopped
+    profiles: ['rvc']
+    ports:
+      - '9091:9091'
+    environment:
+      - HF_ENDPOINT=https://hf-mirror.com
+    volumes:
+      # RVC 模型：每个音色一个子目录（xx.pth + 可选 xx.index）
+      - ./rvc-models:/app/models
+      # RVC hubert/rmvpe 基础模型缓存持久化（首次推理从 hf-mirror 下载）
+      - rvc-hf-cache:/root/.cache/huggingface
+
 volumes:
   easyvoice-audio:
   easyvoice-data:
   xtts-models:
+  vc-checkpoints:
+  rvc-hf-cache:

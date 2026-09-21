@@ -21,6 +21,7 @@ import {
   updateChapterSelection,
 } from '../services/book/book.service'
 import { generateSingleVoiceBuffer } from '../services/edge-tts.service'
+import { convertAudioBuffer, isVcEngine, listVcModels, listVcReferences } from '../services/vc.service'
 
 // base64 膨胀 4/3，需低于全局 express.json 的 20mb 上限
 const MAX_BOOK_FILE_BYTES = 14 * 1024 * 1024
@@ -43,6 +44,8 @@ const bookParamsSchema = z.object({
   pitch: z.string().trim().default('+0Hz'),
   volume: z.string().trim().default('+0%'),
   useLLM: z.boolean().default(false),
+  /** 配音引擎：edge=纯 Edge 预设 / clone=XTTS 声音克隆 / openvoice=Edge+OpenVoice 换声 / rvc=Edge+RVC 换声 */
+  voiceEngine: z.enum(['edge', 'clone', 'openvoice', 'rvc']).default('edge'),
 })
 
 const createBookSchema = z.object({
@@ -261,6 +264,8 @@ export async function stopPlanVoicesHandler(req: Request, res: Response) {
 const characterVoiceEditSchema = z.object({
   character: z.string().trim().min(1),
   voice: z.string().trim().min(1),
+  /** 换声源：openvoice=参考音频名 / rvc=模型名；空串表示解绑 */
+  vcRef: z.string().trim().max(200).optional(),
 })
 
 export async function saveCharacterVoicesHandler(
@@ -319,16 +324,31 @@ export async function previewCharacterHandler(
     const description = (entry.description || '').replace(/\s+/g, ' ').trim()
     const text = `我是${entry.character}。${description || '这是我配音试听。'}`
     // buffer 模式合成：短文本一次成形，风格被微软端拒绝时后端自动去风格重试
-    const buffer = await generateSingleVoiceBuffer({
+    let buffer = await generateSingleVoiceBuffer({
       text,
       voice: entry.voice,
       rate: '+0%',
       pitch: '+0Hz',
       volume: '+0%',
     })
-    // 音频二进制经流式管道写出（Content-Type: audio/mpeg，非 HTML 输出）
-    res.setHeader('Content-Type', 'audio/mpeg')
+    // 换声引擎：试听同样叠加音色转换，保证听到的就是最终效果
+    const engine = book.params.voiceEngine
+    let converted = false
+    if (isVcEngine(engine) && entry.vcRef) {
+      buffer = await convertAudioBuffer(buffer, { engine, ref: entry.vcRef })
+      converted = true
+    }
+    // 下载模式：带附件头由浏览器保存（试听模式则前端直接播放，不落盘）
+    const ext = converted ? 'wav' : 'mp3'
+    res.setHeader('Content-Type', converted ? 'audio/wav' : 'audio/mpeg')
     res.setHeader('Cache-Control', 'no-store')
+    if (req.query.download) {
+      const name = encodeURIComponent(`试听-${entry.character}`)
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="preview.${ext}"; filename*=UTF-8''${name}.${ext}`
+      )
+    }
     res.setHeader('Content-Length', String(buffer.length))
     const audioStream = new PassThrough()
     audioStream.end(buffer)

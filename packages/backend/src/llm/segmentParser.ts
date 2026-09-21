@@ -28,6 +28,8 @@ export interface NormalizedSegment {
   style?: string
   /** 情感强度 0.5~2 */
   styleDegree?: string
+  /** 换声源：openvoice=参考音频名 / rvc=模型名；由角色表绑定经映射带入 */
+  vcRef?: string
 }
 
 /** 角色-音色映射：整本书一份，保证同一角色跨章节音色一致 */
@@ -41,6 +43,8 @@ export interface CharacterVoice {
   dialog?: number
   /** 该角色在书中的其他称呼（与 character 指同一人） */
   aliases?: string[]
+  /** 换声源绑定：openvoice=参考音频名 / rvc=RVC 模型名（voice 仍是合成用基础音色） */
+  vcRef?: string
 }
 
 const SEGMENT_ARRAY_KEYS = ['segments', 'result', 'data', 'list']
@@ -112,7 +116,7 @@ function normalizeStyle(item: Record<string, unknown>): { style?: string; styleD
 export function normalizeSegments(
   raw: Record<string, unknown>[],
   allowedVoices: string[],
-  resolveVoice?: (item: Record<string, unknown>) => string | undefined
+  resolveVoice?: (item: Record<string, unknown>) => { voice: string; vcRef?: string } | undefined
 ): NormalizedSegment[] {
   const fallbackVoice = allowedVoices[0]
   const segments: NormalizedSegment[] = []
@@ -124,8 +128,11 @@ export function normalizeSegments(
       continue
     }
     let voice: string
+    let vcRef: string | undefined
     if (resolveVoice) {
-      voice = resolveVoice(item) ?? fallbackVoice
+      const resolved = resolveVoice(item)
+      voice = resolved?.voice ?? fallbackVoice
+      vcRef = resolved?.vcRef
     } else {
       const candidates: (string | undefined)[] = [item.voice, item.name].map((candidate) =>
         typeof candidate === 'string' ? candidate : undefined
@@ -145,6 +152,7 @@ export function normalizeSegments(
     segments.push({
       text,
       voice,
+      vcRef,
       rate: normalizePercent(item.rate),
       volume: normalizePercent(item.volume),
       pitch: normalizeHz(item.pitch),
@@ -196,10 +204,11 @@ export async function fetchLlmSegments({
     ...voiceList.map((voice) => voice.Name),
     ...extraVoiceIds,
   ]
+  // 角色 → 映射条目（音色 + 换声源），按正名与别名都可命中
   const mapping = new Map(
-    (characterVoices || []).map((c) => [c.character.trim(), c.voice] as const)
+    (characterVoices || []).map((c) => [c.character.trim(), c] as const)
   )
-  const narratorVoice = characterVoices?.find((c) => c.character === '旁白')?.voice || allowedVoices[0]
+  const narratorEntry = characterVoices?.find((c) => c.character === '旁白')
   const prompt = characterVoices?.length
     ? getCharacterSegmentPrompt(
         lang,
@@ -248,7 +257,7 @@ export async function fetchLlmSegments({
         const keys = [item.character, item.name]
           .filter((k) => typeof k === 'string')
           .map((k) => (k as string).trim())
-        let mapped: string | undefined
+        let mapped: (typeof characterVoices)[number] | undefined
         for (const key of keys) {
           if (mapping.has(key)) {
             mapped = mapping.get(key)
@@ -257,16 +266,20 @@ export async function fetchLlmSegments({
         }
         if (!mapped) {
           mapped = keys
-            .map((key) => [...mapping.entries()].find(([name]) => name && (name.includes(key) || key.includes(name)))?.[1])
+            .map((key) =>
+              [...mapping.entries()].find(
+                ([name]) => name && (name.includes(key) || key.includes(name))
+              )?.[1]
+            )
             .find(Boolean)
         }
         if (!mapped) {
-          mapped = narratorVoice
+          mapped = narratorEntry
           logger.warn(
             `Segment character not in mapping, using narrator: ${JSON.stringify(keys.filter(Boolean))}`
           )
         }
-        return mapped
+        return mapped ? { voice: mapped.voice, vcRef: mapped.vcRef } : undefined
       })
       if (!segments.length) {
         throw new Error(

@@ -121,3 +121,25 @@ export const previewPresetVoice = async (payload: VoicePresetPayload): Promise<B
   const response = await api.post<Blob>('/presets/preview', payload, { responseType: 'blob' })
   return response.data
 }
+
+/** 音色转换资源：OpenVoice 参考音频 + RVC 模型（角色表「换声源」下拉框数据源） */
+export interface VcModelInfo {
+  name: string
+  hasIndex: boolean
+}
+export interface VcInfo {
+  references: string[]
+  models: VcModelInfo[]
+}
+export const getVcInfo = async (): Promise<VcInfo> => {
+  const response = await api.get<{
+    success: boolean
+    code: number
+    message?: string
+    data: VcInfo
+  }>('/vc-info')
+  if (response.data?.code !== 200) {
+    throw new Error(response.data?.message || '获取音色转换资源失败')
+  }
+  return response.data.data || { references: [], models: [] }
+}

@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+python-multipart
+numpy<2
+librosa
+soundfile
+# OpenVoice 文本处理链依赖（cleaners/text）
+inflect
+eng_to_ipa
+cn2an
+pypinyin
+jieba
+unidecode
+# OpenVoice 转换器水印组件
+wavmark

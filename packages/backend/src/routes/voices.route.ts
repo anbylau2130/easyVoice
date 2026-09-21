@@ -8,9 +8,13 @@ import {
   saveVoicePresetHandler,
   deleteVoicePresetHandler,
   previewVoicePresetHandler,
+  getVcInfoHandler,
 } from '../controllers/voices.controller'
 
 const router = Router()
+
+// 音色转换资源（OpenVoice 参考音频 / RVC 模型）
+router.get('/vc-info', getVcInfoHandler)
 
 router.get('/custom', listCustomVoicesHandler)
 router.post('/custom', uploadCustomVoiceHandler)

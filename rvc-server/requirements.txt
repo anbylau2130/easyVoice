@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-multipart
+# torchaudio 版本必须与镜像内 torch 2.2.2 匹配，否则 pip 会连 torch 一起重装
+torchaudio==2.2.2
+# RVC v2 推理（含 fairseq==0.12.2 / numpy<=1.23.5 等老依赖；
+# 其 omegaconf 元数据较老，Dockerfile 已先降级 pip<24.1 再安装）
+rvc-python==0.1.5

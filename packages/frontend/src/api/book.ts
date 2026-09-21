@@ -55,6 +55,8 @@ export interface CharacterVoice {
   dialog?: number
   /** 该角色在书中的其他称呼（与 character 指同一人） */
   aliases?: string[]
+  /** 换声源：openvoice=参考音频名 / rvc=模型名（openvoice/rvc 引擎下生效） */
+  vcRef?: string
 }
 
 export interface BookDetail {
@@ -67,6 +69,8 @@ export interface BookDetail {
     pitch: string
     volume: string
     useLLM: boolean
+    /** 配音引擎（旧书可能缺省，视作 edge） */
+    voiceEngine?: VoiceEngine
   }
   chapters: BookChapter[]
   createdAt: string
@@ -98,12 +102,16 @@ export interface BookSummary {
   updatedAt: string
 }
 
+export type VoiceEngine = 'edge' | 'clone' | 'openvoice' | 'rvc'
+
 export interface BookParamsPayload {
   voice: string
   rate: string
   pitch: string
   volume: string
   useLLM: boolean
+  /** 配音引擎：edge=纯 Edge 预设 / clone=XTTS 声音克隆 / openvoice=Edge+OpenVoice 换声 / rvc=Edge+RVC 换声 */
+  voiceEngine?: VoiceEngine
 }
 
 export const parseBook = async (filename: string, contentBase64: string) => {
@@ -224,7 +232,7 @@ export const stopPlanVoices = async (id: string) => {
 
 export const saveCharacterVoices = async (
   id: string,
-  characters: { character: string; voice: string }[]
+  characters: { character: string; voice: string; vcRef?: string }[]
 ) => {
   const response = await api.post<{
     success: boolean
@@ -238,5 +246,5 @@ export const saveCharacterVoices = async (
   return response.data.data
 }
 
-export const characterPreviewUrl = (id: string, character: string) =>
-  `${api.defaults.baseURL}/${id}/character/preview?character=${encodeURIComponent(character)}`
+export const characterPreviewUrl = (id: string, character: string, download?: boolean) =>
+  `${api.defaults.baseURL}/${id}/character/preview?character=${encodeURIComponent(character)}${download ? '&download=1' : ''}`

@@ -13,6 +13,7 @@ import audioCacheInstance, { isCacheEntryUsable } from './audioCache.service'
 import { mergeSubtitleFiles, SubtitleFile, SubtitleFiles } from '../utils/subtitle'
 import taskManager, { Task } from '../utils/taskManager'
 import { handleSrt } from './tts.stream.service'
+import { convertAudioFile, isVcEngine } from './vc.service'
 
 // 错误消息枚举
 export enum ErrorMessages {
@@ -34,7 +35,9 @@ export async function generateTTS(
   params: Required<EdgeSchema>,
   task?: Task,
   onProgress?: TtsProgressCallback,
-  characterVoices?: CharacterVoice[]
+  characterVoices?: CharacterVoice[],
+  /** 音色转换引擎：openvoice/rvc 时，角色绑定的换声源（vcRef）生效 */
+  voiceEngine?: string
 ): Promise<TTSResult> {
   const { text, pitch, voice, rate, volume, useLLM } = params
   // 检查缓存
@@ -52,7 +55,7 @@ export async function generateTTS(
 
   let result: TTSResult
   if (useLLM) {
-    result = await generateWithLLM(segment, voiceList, lang, task, onProgress, characterVoices)
+    result = await generateWithLLM(segment, voiceList, lang, task, onProgress, characterVoices, voiceEngine)
   } else {
     result = await generateWithoutLLM(segment, { text, pitch, voice, rate, volume, output: segment.id }, task, onProgress)
   }
@@ -77,7 +80,8 @@ async function generateWithLLM(
   lang: string,
   task?: Task,
   onProgress?: TtsProgressCallback,
-  characterVoices?: CharacterVoice[]
+  characterVoices?: CharacterVoice[],
+  voiceEngine?: string
 ): Promise<TTSResult> {
   const { text, id } = segment
   const { length, segments: textSegments } = splitText(text.trim())
@@ -88,7 +92,7 @@ async function generateWithLLM(
       text: textSegments[0],
       characterVoices,
     })
-    const result = await buildSegmentList(segment, llmSegments, task, onProgress)
+    const result = await buildSegmentList(segment, llmSegments, task, onProgress, voiceEngine)
     task?.updateProgress?.(task.id, 100)
     return result
   } else {
@@ -104,7 +108,10 @@ async function generateWithLLM(
       const result = await buildSegmentList(
         // 前缀不能含冒号：该 id 会用作 Windows 临时目录名（冒号为保留字符）
         { ...segment, id: `segments-${count}-${segment.id}` },
-        llmSegments
+        llmSegments,
+        task,
+        onProgress,
+        voiceEngine
       )
       task?.updateProgress?.(task.id, getProgress())
       finalSegments.push(result)
@@ -209,7 +216,9 @@ async function buildSegmentList(
   segment: Segment,
   segments: NormalizedSegment[],
   task?: Task,
-  onProgress?: TtsProgressCallback
+  onProgress?: TtsProgressCallback,
+  /** 音色转换引擎；角色绑定的换声源（vcRef）在该引擎下生效 */
+  voiceEngine?: string
 ): Promise<TTSResult> {
   const fileList: string[] = []
   const length = segments.length
@@ -230,9 +239,18 @@ async function buildSegmentList(
     return Number((((handledLength / length) * 100) / (id.includes('segment') ? 2 : 1)).toFixed(2))
   }
   const tasks = segments.map((segment, index) => async () => {
-    const { text, pitch, voice, rate, volume } = segment
+    const { text, pitch, voice, rate, volume, vcRef } = segment
+    const vcOptions = isVcEngine(voiceEngine) && vcRef ? { engine: voiceEngine, ref: vcRef } : undefined
     const output = path.resolve(tmpDirPath, `${index + 1}_splits.mp3`)
-    const cacheKey = taskManager.generateTaskId({ text, pitch, voice, rate, volume })
+    const cacheKey = taskManager.generateTaskId({
+      text,
+      pitch,
+      voice,
+      rate,
+      volume,
+      vcEngine: vcOptions?.engine,
+      vcRef: vcOptions?.ref,
+    })
     const cache = await audioCacheInstance.getAudio(cacheKey)
     if (cache && (await isCacheEntryUsable(cache))) {
       logger.info(`Cache hit[segments]: ${voice} ${text.slice(0, 10)}`)
@@ -250,12 +268,21 @@ async function buildSegmentList(
       output,
     })
     logger.debug(`Cache miss and generate audio: ${result.audio}, ${result.srt}`)
-    fileList.push(result.audio)
+    // 音色转换：edge 合成的基础音频 → vc-server 频谱换声；失败时回落原声（不中断整章生成）
+    let audioFile = result.audio
+    if (vcOptions) {
+      try {
+        audioFile = await convertAudioFile(output, vcOptions)
+      } catch (err) {
+        logger.warn(`Voice conversion failed (${vcOptions.ref}), using base voice: ${(err as Error).message}`)
+      }
+    }
+    fileList.push(audioFile)
     handledLength++
     task?.updateProgress?.(task.id, getProgress())
     onProgress?.(handledLength, length)
     const params = { text, pitch, voice, rate, volume }
-    await audioCacheInstance.setAudio(cacheKey, { ...params, ...result })
+    await audioCacheInstance.setAudio(cacheKey, { ...params, ...result, audio: audioFile })
     return result
   })
   let partial = false

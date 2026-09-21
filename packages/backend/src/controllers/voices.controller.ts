@@ -13,6 +13,7 @@ import {
 } from '../services/voicePreset.service'
 import { previewPresetVoice } from '../services/edge-tts.service'
 import { isCustomVoice, synthesizeCloneVoice } from '../services/clone-tts.service'
+import { listVcModels, listVcReferences } from '../services/vc.service'
 
 // base64 膨胀 4/3，需低于全局 express.json 的 20mb 上限
 const MAX_VOICE_BYTES = 14 * 1024 * 1024
@@ -162,6 +163,17 @@ export async function previewVoicePresetHandler(req: Request, res: Response) {
     res.send(buffer)
   } catch (error) {
     logger.warn(`previewVoicePreset failed: ${(error as Error).message}`)
+    res.status(500).json({ success: false, code: 500, message: (error as Error).message })
+  }
+}
+
+/** 音色转换资源列表：OpenVoice 参考音频 + RVC 模型（供角色表换声源下拉框） */
+export async function getVcInfoHandler(_req: Request, res: Response) {
+  try {
+    const [references, models] = await Promise.all([listVcReferences(), listVcModels()])
+    res.json({ success: true, code: 200, data: { references, models } })
+  } catch (error) {
+    logger.warn(`getVcInfo failed: ${(error as Error).message}`)
     res.status(500).json({ success: false, code: 500, message: (error as Error).message })
   }
 }

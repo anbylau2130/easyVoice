@@ -26,6 +26,8 @@ export interface BookParams {
   pitch: string
   volume: string
   useLLM: boolean
+  /** 配音引擎：edge=纯 Edge 预设 / clone=XTTS 声音克隆 / openvoice=Edge+OpenVoice 换声 / rvc=Edge+RVC 换声 */
+  voiceEngine?: 'edge' | 'clone' | 'openvoice' | 'rvc'
 }
 
 export type ChapterStatus = 'pending' | 'processing' | 'done' | 'failed' | 'skipped'
@@ -65,6 +67,11 @@ export interface Book {
 }
 
 const BOOKS_DIR = path.resolve(AUDIO_DIR, 'books')
+/**
+ * 标准 zh-CN 基础音色白名单：AI 分配音色只从这些普通话声线选取。
+ * 排除 zh-CN-liaoning/shaanxi 等地区方言变体（同样以 zh-CN 开头）与 zh-TW/zh-HK 台腔港腔
+ */
+const STANDARD_ZH_BASES = /^(zh-CN-)?(Xiaoxiao|Xiaoyi|Xiaoxuan|Yunjian|Yunxi|Yunxia|Yunyang)Neural$/
 /** 全局单本锁：同一时刻只生成一本 */
 const runningIds = new Set<string>()
 /** 暂停请求：当前章节完成后生效（章节边界粒度） */
@@ -248,9 +255,25 @@ export async function startBook(id: string): Promise<void> {
 }
 
 async function runBookLoop(book: Book): Promise<void> {
+  // 落盘前必须重读最新书籍、只合并本章跟踪字段：角色表可能被外部并发修改
+  // （重新规划、手动修正音色等），禁止用启动时的陈旧对象整体覆盖回去
+  const saveChapterState = async (chapter: BookChapter) => {
+    const fresh = await loadBook(book.id)
+    if (!fresh) return
+    const target = fresh.chapters.find((c) => c.index === chapter.index)
+    if (target) {
+      Object.assign(target, {
+        status: chapter.status,
+        error: chapter.error,
+        progress: chapter.progress,
+        startedAt: chapter.startedAt,
+        audioFile: chapter.audioFile,
+        srtFile: chapter.srtFile,
+      })
+    }
+    await saveBook(fresh)
+  }
   try {
-    const characterVoices = book.characterVoices
-
     for (const chapter of book.chapters) {
       if (pauseRequested.has(book.id)) break
       if (!isChapterRunnable(chapter)) continue
@@ -259,15 +282,18 @@ async function runBookLoop(book: Book): Promise<void> {
       if (!content.trim()) {
         chapter.status = 'failed'
         chapter.error = '章节内容为空'
-        await saveBook(book)
+        await saveChapterState(chapter)
         continue
       }
       chapter.status = 'processing'
       chapter.error = null
       chapter.progress = 0
       chapter.startedAt = new Date().toISOString()
-      await saveBook(book)
+      await saveChapterState(chapter)
 
+      // 角色-音色映射每章重读：外部修正（如批量替换音色）从下一章起立即生效
+      const voiceMapping =
+        (await loadBook(book.id))?.characterVoices || book.characterVoices
       // 不设章节超时（按需求等待完成而非砍掉）：
       // 失败仍由底层重试与错误抛出处理，失败章节可随时一键重试
       try {
@@ -288,10 +314,11 @@ async function runBookLoop(book: Book): Promise<void> {
             const now = Date.now()
             if (now - lastProgressSave > 1000) {
               lastProgressSave = now
-              void saveBook(book).catch(() => {})
+              void saveChapterState(chapter).catch(() => {})
             }
           },
-          characterVoices
+          voiceMapping,
+          book.params.voiceEngine || 'edge'
         )
         if (result.partial) {
           chapter.status = 'failed'
@@ -308,16 +335,24 @@ async function runBookLoop(book: Book): Promise<void> {
           `Chapter ${chapter.index} of book ${book.id} failed: ${(err as Error).message}`
         )
       }
-      await saveBook(book)
+      await saveChapterState(chapter)
       // 每章完成后兜底清扫根目录旧产物，保持输出目录整洁
       await cleanStaleRootArtifacts()
     }
   } finally {
     runningIds.delete(book.id)
     pauseRequested.delete(book.id)
-    book.status = computeBookStatus(book)
-    await saveBook(book)
-    logger.info(`Book generation finished: ${book.id} -> ${book.status}`)
+    // 收尾状态同样基于最新书籍计算，避免覆盖外部修改
+    const fresh = await loadBook(book.id)
+    const finalStatus = fresh ? computeBookStatus(fresh) : computeBookStatus(book)
+    if (fresh) {
+      fresh.status = finalStatus
+      await saveBook(fresh)
+    } else {
+      book.status = finalStatus
+      await saveBook(book)
+    }
+    logger.info(`Book generation finished: ${book.id} -> ${finalStatus}`)
   }
 }
 
@@ -589,20 +624,38 @@ export async function planBookVoices(
           chapterTexts.find((t) => t.content && t.content.length > 100)?.content.slice(0, 2000) ||
           book.title
         const { lang, voiceList } = await getLangConfig(langProbe)
-        // 角色音色只从用户配置的 Edge 预设中选取（系统音色不参与 AI 分配）。
-        // excludeFromAI 的特殊预设（方言/港台腔）不进入 AI 候选，仅供手动选用
-        const presets = (await listVoicePresets()).filter((p) => !p.excludeFromAI)
-        const candidateVoiceList = presets.map((p) => ({
-          Name: p.id,
-          Gender: p.gender || '',
-          ContentCategories: ['自定义'],
-          VoicePersonalities: [p.voice],
-        }))
-        // 用户还没有任何预设时，回落到系统 zh-CN 音色，保证规划功能可用
+        // 候选音色池按配音引擎区分：
+        //  - clone：XTTS 克隆音色（custom-*），直接用参考声音合成
+        //  - 其余（edge/openvoice/rvc）：用户配置的 Edge 预设（openvoice/rvc 在合成后叠加换声）
+        const engine = book.params.voiceEngine || 'edge'
+        let candidateVoiceList: { Name: string; Gender: string; ContentCategories: string[]; VoicePersonalities: string[] }[]
+        if (engine === 'clone') {
+          const customs = await listCustomVoices()
+          candidateVoiceList = customs.map((v) => ({
+            Name: v.id,
+            Gender: '',
+            ContentCategories: ['克隆'],
+            VoicePersonalities: [],
+          }))
+          if (!candidateVoiceList.length) {
+            throw new Error('声音克隆引擎需要先在「声音克隆」卡片上传至少一个参考音频')
+          }
+        } else {
+          // 角色音色只从用户配置的 Edge 预设中选取（系统音色不参与 AI 分配）。
+          // excludeFromAI 的特殊预设（方言/港台腔）不进入 AI 候选，仅供手动选用
+          const presets = (await listVoicePresets()).filter((p) => !p.excludeFromAI)
+          candidateVoiceList = presets.map((p) => ({
+            Name: p.id,
+            Gender: p.gender || '',
+            ContentCategories: ['自定义'],
+            VoicePersonalities: [p.voice],
+          }))
+        }
+        // 用户还没有任何预设时，回落到标准 zh-CN 音色（不含方言变体），保证规划功能可用
         if (!candidateVoiceList.length) {
           candidateVoiceList.push(
             ...voiceList
-              .filter((v) => v.Name.startsWith('zh-CN'))
+              .filter((v) => STANDARD_ZH_BASES.test(v.Name))
               .map((v) => ({
                 Name: v.Name,
                 Gender: v.Gender || '',
@@ -683,8 +736,12 @@ export async function planBookVoices(
             }
             entry.dialog = (entry.dialog || 0) + s.dialog
           }
-          // 按对白数加权排序：戏份多的角色排前面
-          list.sort((a, b) => (b.dialog || 0) - (a.dialog || 0))
+          // 旁白置顶（叙述占全书大部分篇幅），其余按对白数加权排序：戏份多的角色排前面
+          const narratorRows = list.filter((c) => c.character === '旁白')
+          const otherRows = list.filter((c) => c.character !== '旁白')
+          otherRows.sort((a, b) => (b.dialog || 0) - (a.dialog || 0))
+          list.length = 0
+          list.push(...narratorRows, ...otherRows)
           fresh.characterVoices = list
           await saveBook(fresh)
           return list.length
@@ -762,13 +819,18 @@ export async function planBookVoices(
           logger.warn(`Character description enrichment skipped: ${(e as Error).message}`)
         }
         // ===== 音色分配（两种可配置模式）=====
-        if (assignMode === 'generate') {
+        // 克隆引擎：普查阶段已按性别轮转绑定克隆音色，两种分配模式都跳过
+        if (engine === 'clone') {
+          await setDetail('声音克隆引擎：保留按性别轮转分配的克隆音色，可在角色表中调整')
+          logger.info(`Clone engine: keep survey-assigned clone voices for book ${id}`)
+        } else if (assignMode === 'generate') {
           // 模式 B：AI 为每个角色生成专属音色——按对白数轮转分配 zh-CN 基础音色
           // （主要角色声线不重复），LLM 再按性格微调语速/音调/音量，以角色命名生成预设
           await setDetail('正在为各角色生成专属音色…')
           const genBook = await loadBook(id)
           const genRows = (genBook?.characterVoices || []).filter((r) => r.character !== '旁白')
-          const zhBases = voiceList.filter((v) => v.Name.startsWith('zh-CN'))
+          // 基础音色只用标准普通话声线（白名单排除 liaoning/shaanxi 方言变体）
+          const zhBases = voiceList.filter((v) => STANDARD_ZH_BASES.test(v.Name))
           const femaleBases = zhBases.filter((v) => v.Gender === 'Female')
           const maleBases = zhBases.filter((v) => v.Gender === 'Male')
           const sorted = [...genRows].sort((a, b) => (b.dialog || 0) - (a.dialog || 0))
@@ -922,7 +984,7 @@ ${paramTable}`
  */
 export async function saveCharacterVoices(
   id: string,
-  characters: { character: string; voice: string }[]
+  characters: { character: string; voice: string; vcRef?: string }[]
 ): Promise<void> {
   const book = await loadBook(id)
   if (!book) throw new Error('有声书不存在')
@@ -946,11 +1008,16 @@ export async function saveCharacterVoices(
       throw new Error(`角色「${character}」的音色无效：${voice || '为空'}`)
     }
     seen.add(character)
+    const prev = existing.get(character)
     merged.push({
       character,
       voice,
-      gender: existing.get(character)?.gender,
-      description: existing.get(character)?.description,
+      gender: prev?.gender,
+      description: prev?.description,
+      dialog: prev?.dialog,
+      aliases: prev?.aliases,
+      // 换声源：前端传了用前端的（可传空串显式解绑），否则保留原绑定
+      vcRef: item.vcRef !== undefined ? item.vcRef.trim() || undefined : prev?.vcRef,
     })
   }
   if (!merged.length) throw new Error('角色列表不能为空')
