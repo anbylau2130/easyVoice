@@ -1,27 +1,34 @@
 # EasyVoice Docker Compose
-# 一份文件支持三种部署方式（通过 profiles 与 .env 覆盖自由组合）：
+# 主服务一定部署；可选换声方案：OpenVoice（vc）/ RVC（rvc）/ XTTS 声音克隆（clone）
 #
-# 【方式一：仅主服务（不含声音克隆）】
+# 【方式零：一键部署（主服务 + OpenVoice + RVC，推荐新手）】
+#   Windows 双击 deploy.bat；Linux/macOS 执行 bash deploy.sh
+#   等价于：docker compose --profile vc --profile rvc up -d --build
+#   首次构建约 10-20 分钟（rvc-server 需源码编译）
+#   RVC 音色模型随仓库自带（rvc-models/），可自行增删
+#
+# 【方式一：仅主服务（仅 Edge 预设配音）】
 #   docker compose up -d --build
-#   访问 http://localhost:3000；声音克隆功能不可用，其余功能完整
 #
-# 【方式二：主服务 + 内置 XTTS 克隆服务（推荐）】
-#   docker compose --profile clone up -d --build
-#   首次启动 XTTS 会下载约 1.8GB 模型（已配 hf-mirror 加速）
+# 【方式二：只装一种换声方案】
+#   OpenVoice 版：docker compose --profile vc up -d --build
+#   RVC 版：      docker compose --profile rvc up -d --build
 #
-# 【方式三：主服务 + 独立部署的克隆服务（另一台机器/GPU 机器）】
-#   1. 克隆机单独运行 XTTS，并共享本机 audio 目录（目录内 custom-voices/ 为参考音频）：
-#      docker run -d -p 8020:8020 --restart unless-stopped \
-#        -v /本机路径/easyVoice/packages/backend/audio:/app/speakers \
-#        -e HF_ENDPOINT=https://hf-mirror.com -e COQUI_TOS_AGREED=1 \
-#        daswer123/xtts-api-server:latest
-#   2. 在根目录 .env 中设置（克隆服务不是本机时，参考音频目录需自行同步）：
-#      TTS_CLONE_URL=http://克隆机IP:8020
-#      TTS_CLONE_SPEAKERS_DIR=/app/speakers/custom-voices
+# 【方式三：换声服务单独部署在另一台机器】
+#   1. 换声机在仓库根目录单独构建运行（详见 README「方式 C」）：
+#      vc-server  -> -p 9090:9090，挂载 voices/ 为 /app/references:ro
+#      rvc-server -> -p 9091:9091，挂载 rvc-models/ 为 /app/models
+#   2. 主服务所在机器的 .env 设置：
+#      VC_SERVER_URL=http://换声机IP:9090
+#      RVC_SERVER_URL=http://换声机IP:9091
 #   3. docker compose up -d --build
 #
+# 【可选加项：XTTS 声音克隆】
+#   docker compose --profile vc --profile rvc --profile clone up -d --build
+#   首次启动 XTTS 另下载约 1.8GB 模型（已配 hf-mirror 加速）
+#
 # 提示：
-# - `docker compose up -d` 想默认带上 XTTS 时，在 .env 里设置 COMPOSE_PROFILES=clone 即可
+# - `docker compose up -d` 想默认带可选服务时，在 .env 里设置 COMPOSE_PROFILES=vc,rvc
 # - 声音克隆服务地址也可在页面「声音克隆」卡片中配置（页面配置优先级更高）
 # - AI 模式（智能配音）需要 LLM：在 .env 填 OPENAI_API_KEY / OPENAI_BASE_URL / MODEL_NAME，
 #   或部署后在页面「AI 模型配置」卡片填写（页面配置优先级更高）

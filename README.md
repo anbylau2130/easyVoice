@@ -52,15 +52,85 @@
 
 ### 1. 通过 docker 运行
 
+主服务（Web 界面 + API）是一定要部署的，可选的是换声方案：**OpenVoice 换声**或 **RVC 换声**（二选一或都装）。
+
+#### 方式 A：一键部署（主服务 + OpenVoice + RVC，推荐）
+
+克隆仓库后，Windows 双击 **`deploy.bat`**，Linux/macOS 执行 **`bash deploy.sh`**，或手动执行：
+
 ```bash
-# 极简运行，你可以通过 -e 指定环境变量
+docker compose --profile vc --profile rvc up -d --build
+```
+
+启动 3 个服务：
+
+| 服务 | 端口 | 作用 |
+| --- | --- | --- |
+| easyvoice | 3000 | 主服务（Web 界面 + API，必部署） |
+| vc-server | 9090 | OpenVoice 换声（参考音频零样本换音色） |
+| rvc-server | 9091 | RVC v2 换声（已训练模型换音色，相似度最高） |
+
+说明：
+
+- 首次构建约 10-20 分钟（rvc-server 需源码编译），之后启动很快
+- RVC 音色模型随仓库自带（`rvc-models/`），把 `<模型名>/<模型名>.pth`（+ 可选同名 `.index`）放进该目录即可新增音色
+- AI 智能配音需要 LLM：部署前编辑 `.env`（可从 `.env.example` 复制）填写 `OPENAI_API_KEY`，或部署后在页面「AI 模型配置」卡片填写
+- 极简单容器运行（无换声服务，仅 Edge 预设配音）：
+
+```bash
 docker run -d -p 3000:3000 -v $(pwd)/audio:/app/audio cosincox/easyvoice:latest
 ```
 
-or 将仓库克隆到本地，使用 Docker Compose 一键运行！
+#### 方式 B：只装一种换声方案（OpenVoice 版 或 RVC 版）
 
 ```bash
-docker-compose up -d
+# OpenVoice 版（主服务 + vc-server）
+docker compose --profile vc up -d --build
+
+# RVC 版（主服务 + rvc-server）
+docker compose --profile rvc up -d --build
+```
+
+创建有声书时选择对应引擎（「OpenVoice 换声」或「RVC 换声」）即可使用。
+
+#### 方式 C：换声服务单独部署在另一台机器
+
+主服务照常 `docker compose up -d --build` 部署，换声服务放到其他机器：
+
+```bash
+# —— 换声服务所在机器 ——
+# OpenVoice（在仓库根目录构建并运行）
+docker build -t easyvoice-vc-server ./vc-server
+docker run -d -p 9090:9090 --restart unless-stopped \
+  -v $(pwd)/voices:/app/references:ro \
+  -v vc-checkpoints:/app/checkpoints_v2 \
+  easyvoice-vc-server
+
+# RVC（在仓库根目录构建并运行；需 g++ 编译 fairseq，首次构建约 10-20 分钟）
+docker build -t easyvoice-rvc-server ./rvc-server
+docker run -d -p 9091:9091 --restart unless-stopped \
+  -v $(pwd)/rvc-models:/app/models \
+  -v rvc-hf-cache:/root/.cache/huggingface \
+  easyvoice-rvc-server
+```
+
+- OpenVoice 参考音色：把 wav 放进 `voices/` 目录（文件名即换声源名），实时生效
+- RVC 音色模型：`rvc-models/<模型名>/<模型名>.pth`（+ 可选同名 `.index`），实时生效；来源见 `rvc-models/README.txt`
+- Windows 手动运行容器时，`-v` 挂载请使用完整路径（如 `-v D:\easyVoice\rvc-models:/app/models`）
+
+```bash
+# —— 主服务所在机器 ——
+# 在 .env 中把换声服务指向实际地址：
+VC_SERVER_URL=http://换声机IP:9090
+RVC_SERVER_URL=http://换声机IP:9091
+```
+
+#### 可选：XTTS 声音克隆
+
+直接用参考声音合成（一步到位但 CPU 较慢），需要时加 `--profile clone`：
+
+```bash
+docker compose --profile vc --profile rvc --profile clone up -d --build
 ```
 
 ### 2. 本地运行项目（请先确保已安装 Node.js 环境，参考：[安装 Node.js](https://zhuanlan.zhihu.com/p/442215189)）
@@ -208,6 +278,10 @@ pnpm dev
 | `RATE_LIMIT_WINDOW`| `1`                           | 速率限制窗口大小（分钟）         |
 | `RATE_LIMIT`       | `10`                          | 速率限制次数                   |
 | `EDGE_API_LIMIT`   | `3`                           | Edge-TTS API 并发数           |
+| `TTS_CLONE_URL`    | `http://xtts-server:8020`     | XTTS 声音克隆服务地址          |
+| `VC_SERVER_URL`    | `http://vc-server:9090`       | OpenVoice 换声服务地址         |
+| `RVC_SERVER_URL`   | `http://rvc-server:9091`      | RVC 换声服务地址               |
+| `COMPOSE_PROFILES` | -                             | 一键启动的可选服务（clone,vc,rvc） |
 
 - **配置文件**：可在 `.env` 或 `packages/backend/.env` 中设置，优先级为 `packages/backend/.env > .env`。  
 - **Docker 配置**：通过 `-e` 参数传入环境变量，如上文示例。
