@@ -223,7 +223,6 @@ async function buildSegmentList(
   /** 音色转换引擎；角色绑定的换声源（vcRef）在该引擎下生效 */
   voiceEngine?: string
 ): Promise<TTSResult> {
-  const fileList: string[] = []
   const length = segments.length
   let handledLength = 0
 
@@ -243,8 +242,12 @@ async function buildSegmentList(
   }
   // 失败片段多轮自动补齐：Edge 偶发断流（1006 等）多为瞬时故障，逐轮退避重试，
   // 保证章节音频内容完整——绝不允许"缺段"的有声书；仍失败的章节标记 partial，
-  // 由章节级重试兜底（已成功的片段走缓存，重试代价极小）
+  // 由章节级重试兜底（已成功的片段走缓存，重试代价极小）。
+  // 片段音频按索引收进 audioByIndex，最终统一组装：同一片段无论重跑几轮都只会出现一次，
+  // 从结构上杜绝"重复播放同一句"。
   const MAX_ROUNDS = 4
+  const audioByIndex = new Map<number, string>()
+  const doneIndexes = new Set<number>()
   let pending = segments.map((segment, index) => ({ segment, index }))
   let round = 0
   while (pending.length && round < MAX_ROUNDS) {
@@ -271,9 +274,11 @@ async function buildSegmentList(
       const cache = await audioCacheInstance.getAudio(cacheKey)
       if (cache && (await isCacheEntryUsable(cache))) {
         logger.info(`Cache hit[segments]: ${voice} ${text.slice(0, 10)}`)
-        fileList.push(cache.audio)
-        handledLength++
-        onProgress?.(handledLength, length)
+        audioByIndex.set(index, cache.audio)
+        if (!doneIndexes.has(index)) {
+          doneIndexes.add(index)
+          onProgress?.(++handledLength, length)
+        }
         return cache
       }
       const result = await generateSingleVoice({
@@ -294,10 +299,12 @@ async function buildSegmentList(
           logger.warn(`Voice conversion failed (${vcOptions.ref}), using base voice: ${(err as Error).message}`)
         }
       }
-      fileList.push(audioFile)
-      handledLength++
-      task?.updateProgress?.(task.id, getProgress())
-      onProgress?.(handledLength, length)
+      audioByIndex.set(index, audioFile)
+      if (!doneIndexes.has(index)) {
+        doneIndexes.add(index)
+        task?.updateProgress?.(task.id, getProgress())
+        onProgress?.(++handledLength, length)
+      }
       const params = { text, pitch, voice, rate, volume }
       await audioCacheInstance.setAudio(cacheKey, { ...params, ...result, audio: audioFile })
       return result
@@ -308,6 +315,12 @@ async function buildSegmentList(
       if (results?.[i]?.success) pending.splice(i, 1)
     }
     round++
+  }
+  // 按原始段序组装文件列表：缺失的片段（多轮重试后仍失败）不会出现在拼接中
+  const fileList: string[] = []
+  for (let i = 0; i < length; i++) {
+    const audioFile = audioByIndex.get(i)
+    if (audioFile) fileList.push(audioFile)
   }
   const partial = pending.length > 0
   if (partial) {
