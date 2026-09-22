@@ -137,11 +137,14 @@ services:
     profiles: ['rvc']
     ports:
       - '9091:9091'
+    # torch 进程较重：限制内存防止拖垮 Docker 虚拟机（模型缓存本身有 LRU 上限）
+    mem_limit: 4g
     dns:
       - 223.5.5.5
       - 119.29.29.29
     environment:
       - HF_ENDPOINT=https://hf-mirror.com
+      - RVC_MODEL_CACHE=2
     volumes:
       # RVC 模型：每个音色一个子目录（xx.pth + 可选 xx.index）
       - ./rvc-models:/app/models

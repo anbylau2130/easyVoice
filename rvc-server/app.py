@@ -20,6 +20,7 @@ import os
 import subprocess
 import tempfile
 import threading
+from collections import OrderedDict
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, UploadFile
@@ -28,10 +29,12 @@ from fastapi.responses import JSONResponse, Response
 MODELS_DIR = Path(os.environ.get('RVC_MODELS_DIR', '/app/models'))
 DEVICE = 'cpu'
 F0_METHOD = os.environ.get('RVC_F0METHOD', 'rmvpe')
+# 常驻内存的模型数上限：每个 RVC 模型占数百 MB，逐个试听角色会把内存撑爆
+MODEL_CACHE_LIMIT = int(os.environ.get('RVC_MODEL_CACHE', '2'))
 
 app = FastAPI(title='EasyVoice RVC Server', description='RVC v2 tone-color conversion')
-# 模型懒加载缓存 + 推理互斥（CPU 推理非线程安全）
-inference_cache: dict[str, object] = {}
+# 模型懒加载缓存（LRU：超限淘汰最久未用的）+ 推理互斥（CPU 推理非线程安全）
+inference_cache: "OrderedDict[str, object]" = OrderedDict()
 infer_lock = threading.Lock()
 
 
@@ -56,21 +59,26 @@ def find_model(name: str) -> tuple[Path, Path | None] | None:
 
 
 def get_inference(name: str):
-    """懒加载并缓存指定模型的推理器（首次调用会拉取 hubert/rmvpe 基础模型）"""
+    """懒加载并缓存指定模型的推理器（首次调用会拉取 hubert/rmvpe 基础模型）。
+    LRU 上限 MODEL_CACHE_LIMIT：超出时释放最久未用的模型，防止内存无限增长"""
     found = find_model(name)
     if not found:
         return None
     pth, index = found
     if name in inference_cache:
+        inference_cache.move_to_end(name)
         return inference_cache[name]
     from rvc_python.infer import RVCInference
 
     inference = RVCInference(device=DEVICE)
     if index is not None:
-        inference.load_model(str(pth), index_path=str(index))
+        inference.load_model(str(pth), index_path=str(index), index_rate=0.75)
     else:
         inference.load_model(str(pth))
     inference_cache[name] = inference
+    while len(inference_cache) > MODEL_CACHE_LIMIT:
+        evicted, _ = inference_cache.popitem(last=False)
+        print(f'[rvc-server] 模型缓存已满，释放最久未用的模型: {evicted}')
     return inference
 
 
