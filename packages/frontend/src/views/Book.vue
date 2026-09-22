@@ -1041,7 +1041,7 @@ async function applyBatchVoices() {
     for (const row of rows) {
       if (batchVoice.value) row.voice = batchVoice.value
       if (isVcEngineBook.value && batchVcRef.value) {
-        row.vcRef = unbindVc ? undefined : batchVcRef.value
+        row.vcRef = unbindVc ? '' : batchVcRef.value
       }
     }
     voicesDirty.value = true
@@ -1687,7 +1687,13 @@ async function handleSaveVoices(silent = false): Promise<boolean> {
   try {
     await saveCharacterVoices(
       bookId.value,
-      editingVoices.value.map((v) => ({ character: v.character, voice: v.voice, vcRef: v.vcRef }))
+      // vcRef 空值必须规范化为 ''（解绑信号）：undefined 会被 JSON 序列化丢弃，
+      // 后端按"未传=保留原绑定"处理，导致清空换声源后旧绑定复活
+      editingVoices.value.map((v) => ({
+        character: v.character,
+        voice: v.voice,
+        vcRef: v.vcRef ?? '',
+      }))
     )
     voicesDirty.value = false
     if (!silent) ElMessage.success('角色音色已更新')
