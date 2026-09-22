@@ -788,6 +788,11 @@
             <div class="chapter-error-detail">
               <template v-if="row.error">
                 <div class="error-line">错误信息：{{ row.error }}</div>
+                <div class="error-actions">
+                  <el-button size="small" type="primary" link @click="copyChapterError(row)">
+                    复制错误信息
+                  </el-button>
+                </div>
                 <div class="error-hint">可在修复问题后点击「重试失败章节」，已完成章节不会重复生成。</div>
               </template>
               <span v-else class="error-hint">该章节暂无错误信息。</span>
@@ -2094,6 +2099,16 @@ function playChapter(row: { index: number; title: string }) {
   const index = playableChapters.value.findIndex((c) => c.index === row.index)
   if (index < 0) return
   void chapterPlayerLoad(index)
+}
+
+async function copyChapterError(row: { error?: string | null }) {
+  if (!row.error) return
+  try {
+    await navigator.clipboard.writeText(row.error)
+    ElMessage.success('错误信息已复制')
+  } catch {
+    ElMessage.error('复制失败，请手动选择文本复制')
+  }
 }
 
 async function loadLlmSettings() {

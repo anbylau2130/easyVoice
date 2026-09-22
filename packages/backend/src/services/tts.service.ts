@@ -383,6 +383,30 @@ function validateTTSResult(result: TTSResult, segmentId: string): void {
 }
 
 /**
+ * 生成指定毫秒的 24kHz 单声道 16-bit 静音 WAV（纯数据构造，不依赖 ffmpeg 滤镜/输入格式）
+ */
+function silenceWav(ms: number): Buffer {
+  const sampleRate = 24000
+  const samples = Math.max(1, Math.round((sampleRate * ms) / 1000))
+  const dataSize = samples * 2
+  const buf = Buffer.alloc(44 + dataSize)
+  buf.write('RIFF', 0)
+  buf.writeUInt32LE(36 + dataSize, 4)
+  buf.write('WAVE', 8)
+  buf.write('fmt ', 12)
+  buf.writeUInt32LE(16, 16)
+  buf.writeUInt16LE(1, 20) // PCM
+  buf.writeUInt16LE(1, 22) // 单声道
+  buf.writeUInt32LE(sampleRate, 24)
+  buf.writeUInt32LE(sampleRate * 2, 28) // 字节率 = 采样率 × 2 字节
+  buf.writeUInt16LE(2, 32) // 块对齐
+  buf.writeUInt16LE(16, 34) // 位深
+  buf.write('data', 36)
+  buf.writeUInt32LE(dataSize, 40)
+  return buf
+}
+
+/**
  * 拼接音频文件（可选段间静音插入，用于对话/段落间的自然停顿）
  */
 export async function concatDirAudio({
@@ -397,7 +421,9 @@ export async function concatDirAudio({
   let listEntries = mp3Files.map((file) => `file '${file}'`)
   if (segmentPausesMs?.some((ms) => ms > 0)) {
     // Edge 免费端点不支持 SSML break：段间停顿用真实静音片段在拼接时插入。
-    // 静音参数与 Edge 输出一致（24kHz 单声道 96kbps MP3），保证 concat copy 兼容
+    // 静音参数与 Edge 输出一致（24kHz 单声道 96kbps MP3），保证 concat copy 兼容。
+    // 静音 WAV 由代码直接构造（不依赖 anullsrc/lavfi 输入：fluent-ffmpeg 对 ffmpeg8
+    // 的能力检测有缺陷，会误报 "Input format lavfi is not available"），再常规转码为 MP3
     const silFiles = new Map<number, string>()
     const entries: string[] = []
     for (let i = 0; i < mp3Files.length; i++) {
@@ -407,18 +433,19 @@ export async function concatDirAudio({
         let sil = silFiles.get(ms)
         if (!sil) {
           const silPath = path.resolve(inputDir, `pause_${ms}ms.mp3`)
+          const wavPath = path.resolve(inputDir, `pause_${ms}ms.wav`)
+          await fs.writeFile(wavPath, silenceWav(ms))
           await new Promise<void>((resolve, reject) => {
-            ffmpeg()
-              .input('anullsrc=r=24000:cl=mono')
-              .inputFormat('lavfi')
-              .audioCodec('libmp3lame')
+            ffmpeg(wavPath)
+              .audioChannels(1)
+              .audioFrequency(24000)
               .audioBitrate(96)
-              .duration(ms / 1000)
               .output(silPath)
               .on('end', () => resolve())
               .on('error', (err) => reject(new Error(`Silence generation failed: ${err.message}`)))
               .run()
           })
+          await fs.rm(wavPath, { force: true })
           sil = silPath
           silFiles.set(ms, sil)
         }
