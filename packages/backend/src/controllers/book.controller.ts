@@ -22,6 +22,7 @@ import {
 } from '../services/book/book.service'
 import { generateSingleVoiceBuffer } from '../services/edge-tts.service'
 import { convertAudioBuffer, isVcEngine, listVcModels, listVcReferences } from '../services/vc.service'
+import { buildPreviewCacheKey, readPreviewCache, writePreviewCache } from '../services/previewCache.service'
 
 // base64 膨胀 4/3，需低于全局 express.json 的 20mb 上限
 const MAX_BOOK_FILE_BYTES = 14 * 1024 * 1024
@@ -323,24 +324,39 @@ export async function previewCharacterHandler(
     }
     const description = (entry.description || '').replace(/\s+/g, ' ').trim()
     const text = `我是${entry.character}。${description || '这是我配音试听。'}`
-    // buffer 模式合成：短文本一次成形，风格被微软端拒绝时后端自动去风格重试
-    let buffer = await generateSingleVoiceBuffer({
+    const engine = book.params.voiceEngine
+    const vcOptions = isVcEngine(engine) && entry.vcRef ? { engine, ref: entry.vcRef } : undefined
+    const ext = vcOptions ? 'wav' : 'mp3'
+    // 试听缓存：同角色同参数（音色/换声源/文本）直接回放缓存文件，避免重复合成；
+    // 任一参数变化会生成新缓存键自动失效（键的生成与文件读写都在 previewCache 服务内完成）
+    const cacheKey = buildPreviewCacheKey({
       text,
       voice: entry.voice,
-      rate: '+0%',
-      pitch: '+0Hz',
-      volume: '+0%',
+      engine: engine || 'edge',
+      ref: entry.vcRef || '',
     })
-    // 换声引擎：试听同样叠加音色转换，保证听到的就是最终效果
-    const engine = book.params.voiceEngine
-    let converted = false
-    if (isVcEngine(engine) && entry.vcRef) {
-      buffer = await convertAudioBuffer(buffer, { engine, ref: entry.vcRef })
-      converted = true
+
+    let buffer = await readPreviewCache(cacheKey, ext)
+    if (buffer) {
+      logger.info(`Character preview cache hit: ${entry.character}`)
+    } else {
+      // buffer 模式合成：短文本一次成形，风格被微软端拒绝时后端自动去风格重试
+      buffer = await generateSingleVoiceBuffer({
+        text,
+        voice: entry.voice,
+        rate: '+0%',
+        pitch: '+0Hz',
+        volume: '+0%',
+      })
+      // 换声引擎：试听同样叠加音色转换，保证听到的就是最终效果
+      if (vcOptions) {
+        buffer = await convertAudioBuffer(buffer, vcOptions)
+      }
+      await writePreviewCache(cacheKey, ext, buffer)
+      logger.info(`Character preview synthesized and cached: ${entry.character}`)
     }
     // 下载模式：带附件头由浏览器保存（试听模式则前端直接播放，不落盘）
-    const ext = converted ? 'wav' : 'mp3'
-    res.setHeader('Content-Type', converted ? 'audio/wav' : 'audio/mpeg')
+    res.setHeader('Content-Type', vcOptions ? 'audio/wav' : 'audio/mpeg')
     res.setHeader('Cache-Control', 'no-store')
     if (req.query.download) {
       const name = encodeURIComponent(`试听-${entry.character}`)
