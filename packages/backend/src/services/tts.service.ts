@@ -37,12 +37,16 @@ export async function generateTTS(
   onProgress?: TtsProgressCallback,
   characterVoices?: CharacterVoice[],
   /** 音色转换引擎：openvoice/rvc 时，角色绑定的换声源（vcRef）生效 */
-  voiceEngine?: string
+  voiceEngine?: string,
+  /** 全文重新生成（强制全新合成）时忽略音频缓存 */
+  ignoreCache?: boolean
 ): Promise<TTSResult> {
   const { text, pitch, voice, rate, volume, useLLM } = params
   // 检查缓存
   const cacheKey = taskManager.generateTaskId({ text, pitch, voice, rate, volume })
-  const cache = await audioCacheInstance.getAudio(cacheKey)
+  const cache = ignoreCache
+    ? null
+    : await audioCacheInstance.getAudio(cacheKey)
   if (cache && (await isCacheEntryUsable(cache))) {
     logger.info(`Cache hit: ${voice} ${text.slice(0, 10)}`)
     return cache
@@ -55,9 +59,9 @@ export async function generateTTS(
 
   let result: TTSResult
   if (useLLM) {
-    result = await generateWithLLM(segment, voiceList, lang, task, onProgress, characterVoices, voiceEngine)
+    result = await generateWithLLM(segment, voiceList, lang, task, onProgress, characterVoices, voiceEngine, ignoreCache)
   } else {
-    result = await generateWithoutLLM(segment, { text, pitch, voice, rate, volume, output: segment.id }, task, onProgress)
+    result = await generateWithoutLLM(segment, { text, pitch, voice, rate, volume, output: segment.id }, task, onProgress, ignoreCache)
   }
 
   // 验证结果并缓存
@@ -81,7 +85,8 @@ async function generateWithLLM(
   task?: Task,
   onProgress?: TtsProgressCallback,
   characterVoices?: CharacterVoice[],
-  voiceEngine?: string
+  voiceEngine?: string,
+  ignoreCache?: boolean
 ): Promise<TTSResult> {
   const { text, id } = segment
   const { length, segments: textSegments } = splitText(text.trim())
@@ -92,7 +97,7 @@ async function generateWithLLM(
       text: textSegments[0],
       characterVoices,
     })
-    const result = await buildSegmentList(segment, llmSegments, task, onProgress, voiceEngine)
+    const result = await buildSegmentList(segment, llmSegments, task, onProgress, voiceEngine, ignoreCache)
     task?.updateProgress?.(task.id, 100)
     return result
   } else {
@@ -111,7 +116,8 @@ async function generateWithLLM(
         llmSegments,
         task,
         onProgress,
-        voiceEngine
+        voiceEngine,
+        ignoreCache
       )
       task?.updateProgress?.(task.id, getProgress())
       finalSegments.push(result)
@@ -166,7 +172,8 @@ async function generateWithoutLLM(
   segment: Segment,
   params: TTSParams,
   task?: Task,
-  onProgress?: TtsProgressCallback
+  onProgress?: TtsProgressCallback,
+  ignoreCache?: boolean
 ): Promise<TTSResult> {
   const { text, pitch, voice, rate, volume } = params
   const { length, segments } = splitText(text)
@@ -177,7 +184,7 @@ async function generateWithoutLLM(
     return result
   } else {
     const buildSegments = segments.map((segment) => ({ ...params, text: segment }))
-    const result = await buildSegmentList(segment, buildSegments, task, onProgress)
+    const result = await buildSegmentList(segment, buildSegments, task, onProgress, undefined, ignoreCache)
     task?.updateProgress?.(task.id, 100)
     return result
   }
@@ -221,7 +228,9 @@ async function buildSegmentList(
   task?: Task,
   onProgress?: TtsProgressCallback,
   /** 音色转换引擎；角色绑定的换声源（vcRef）在该引擎下生效 */
-  voiceEngine?: string
+  voiceEngine?: string,
+  /** 全文重新生成（强制全新合成）时忽略片段缓存 */
+  ignoreCache?: boolean
 ): Promise<TTSResult> {
   const length = segments.length
   let handledLength = 0
@@ -271,7 +280,9 @@ async function buildSegmentList(
         vcEngine: vcOptions?.engine,
         vcRef: vcOptions?.ref,
       })
-      const cache = await audioCacheInstance.getAudio(cacheKey)
+      const cache = ignoreCache
+        ? null
+        : await audioCacheInstance.getAudio(cacheKey)
       if (cache && (await isCacheEntryUsable(cache))) {
         logger.info(`Cache hit[segments]: ${voice} ${text.slice(0, 10)}`)
         audioByIndex.set(index, cache.audio)

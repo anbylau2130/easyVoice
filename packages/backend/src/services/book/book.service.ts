@@ -254,7 +254,7 @@ export async function startBook(id: string): Promise<void> {
   }
 }
 
-async function runBookLoop(book: Book, onlyIndexes?: Set<number>): Promise<void> {
+async function runBookLoop(book: Book, onlyIndexes?: Set<number>, ignoreCache?: boolean): Promise<void> {
   // 落盘前必须重读最新书籍、只合并本章跟踪字段：角色表可能被外部并发修改
   // （重新规划、手动修正音色等），禁止用启动时的陈旧对象整体覆盖回去
   const saveChapterState = async (chapter: BookChapter) => {
@@ -319,7 +319,8 @@ async function runBookLoop(book: Book, onlyIndexes?: Set<number>): Promise<void>
             }
           },
           voiceMapping,
-          book.params.voiceEngine || 'edge'
+          book.params.voiceEngine || 'edge',
+          ignoreCache
         )
         if (result.partial) {
           chapter.status = 'failed'
@@ -571,6 +572,46 @@ export async function regenerateChapter(id: string, index: number): Promise<void
     logger.info(`Regenerating chapter ${index} of book ${id}`)
     void runBookLoop(fresh, new Set([index])).catch((err) => {
       logger.error(`Chapter regeneration crashed: ${(err as Error).message}`)
+    })
+  } catch (err) {
+    runningIds.delete(id)
+    throw err
+  }
+}
+
+/**
+ * 全文重新生成：将全部未跳过章节标记为待生成并重新运行生成循环，覆盖原有音频。
+ * fresh=true 时忽略音频缓存强制全新合成（用于彻底重做）；false 时复用未变化的片段缓存（快）。
+ */
+export async function regenerateAllChapters(id: string, fresh = false): Promise<void> {
+  if (!BOOK_ID_PATTERN.test(id)) throw new Error('无效的有声书 ID')
+  if (runningIds.size > 0) throw new Error('已有有声书任务进行中，请等待完成或暂停后再试')
+  if (planningIds.has(id)) throw new Error('角色音色正在规划中，请稍候')
+  const book = await loadBook(id)
+  if (!book) throw new Error('有声书不存在')
+  if (book.params.useLLM && !book.characterVoices?.length) {
+    throw new Error('请先生成角色音色规划，再重新生成')
+  }
+  const targets = book.chapters.filter((c) => c.status !== 'skipped')
+  if (!targets.length) throw new Error('没有可生成的章节')
+
+  runningIds.add(id)
+  pauseRequested.delete(id)
+  try {
+    const freshBook = await loadBook(id)
+    if (!freshBook) throw new Error('有声书不存在')
+    freshBook.status = 'running'
+    freshBook.message = undefined
+    for (const c of freshBook.chapters) {
+      if (c.status === 'skipped') continue
+      c.status = 'pending'
+      c.error = null
+      c.progress = 0
+    }
+    await saveBook(freshBook)
+    logger.info(`Regenerating all chapters of book ${id}${fresh ? ' (ignore cache)' : ''}`)
+    void runBookLoop(freshBook, undefined, fresh).catch((err) => {
+      logger.error(`Full regeneration crashed: ${(err as Error).message}`)
     })
   } catch (err) {
     runningIds.delete(id)

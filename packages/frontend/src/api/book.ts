@@ -192,6 +192,18 @@ export const regenerateChapter = async (id: string, index: number) => {
   return response.data?.message
 }
 
+/** 全文重新生成：全部章节重新合成并覆盖。fresh=true 忽略音频缓存强制全新合成 */
+export const regenerateAll = async (id: string, fresh: boolean) => {
+  const response = await api.post<{ success: boolean; code: number; message?: string }>(
+    `/${id}/regenerateAll`,
+    { fresh }
+  )
+  if (response.data?.code !== 200) {
+    throw new Error(response.data?.message || '重新生成失败')
+  }
+  return response.data?.message
+}
+
 export const deleteBook = async (id: string) => {
   const response = await api.delete<{ success: boolean; code: number; message?: string }>(`/${id}`)
   if (response.data?.code !== 200) {

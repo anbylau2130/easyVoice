@@ -526,6 +526,24 @@
         <el-button v-if="failedCount" type="danger" round plain @click="handleRetryFailed">
           重试失败章节
         </el-button>
+        <el-dropdown
+          v-if="bookDetail && bookDetail.status !== 'running' && !bookDetail?.planning && doneCount + failedCount > 0"
+          @command="handleRegenerateAll"
+        >
+          <el-button round plain type="warning" :loading="regenerateAllLoading">
+            重新生成全书<el-icon class="el-icon--right"><arrow-down /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="cached">
+                常规模式：复用未变化的片段（快，推荐改音色/换声源后使用）
+              </el-dropdown-item>
+              <el-dropdown-item command="fresh">
+                强制全新合成：忽略缓存全部重做（慢，彻底重修音质问题）
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <el-button round plain @click="backToUpload">新建有声书</el-button>
       </div>
 
@@ -881,7 +899,7 @@ import {
   type VoicePreset,
   type VcInfo,
 } from '@/api/voices'
-import { LoaderCircle, Search, Play, Pause, SkipBack, SkipForward } from 'lucide-vue-next'
+import { LoaderCircle, Search, Play, Pause, SkipBack, SkipForward, ArrowDown } from 'lucide-vue-next'
 import {
   chapterAudioUrl,
   chapterSrtUrl,
@@ -898,6 +916,7 @@ import {
   resumeBook,
   retryFailedChapters,
   regenerateChapter,
+  regenerateAll,
   saveCharacterVoices,
   type BookDetail,
   type BookSummary,
@@ -2112,6 +2131,35 @@ async function handleRetryFailed() {
     await refreshDetail()
   } catch (error) {
     ElMessage.error((error as Error).message)
+  }
+}
+
+/** 全文重新生成：全部章节重新合成并覆盖现有音频 */
+const regenerateAllLoading = ref(false)
+async function handleRegenerateAll(command: 'cached' | 'fresh') {
+  if (!bookId.value || !bookDetail.value) return
+  const fresh = command === 'fresh'
+  const total = bookDetail.value.chapters.filter((c) => c.status !== 'skipped').length
+  try {
+    await ElMessageBox.confirm(
+      fresh
+        ? `将忽略缓存，强制重新合成全部 ${total} 章，并覆盖现有音频与字幕。耗时较长（每章都完整重做），确定继续吗？`
+        : `将使用当前音色/换声源设置重新生成全部 ${total} 章并覆盖现有音频。未变化的片段会复用缓存（较快），确定继续吗？`,
+      '重新生成全书',
+      { type: 'warning', confirmButtonText: '开始重新生成', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  regenerateAllLoading.value = true
+  try {
+    await regenerateAll(bookId.value, fresh)
+    ElMessage.success('已开始全文重新生成')
+    await refreshDetail()
+  } catch (error) {
+    ElMessage.error((error as Error).message || '重新生成失败')
+  } finally {
+    regenerateAllLoading.value = false
   }
 }
 

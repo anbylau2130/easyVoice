@@ -14,6 +14,7 @@ import {
   resumeBook,
   retryFailedChapters,
   regenerateChapter,
+  regenerateAllChapters,
   chapterFilePath,
   bookOutputDir,
   planBookVoices,
@@ -175,6 +176,21 @@ export async function regenerateChapterHandler(req: Request, res: Response, next
     }
     await regenerateChapter(req.params.id, index)
     res.json({ success: true, code: 200, message: '已开始重新生成该章节' })
+  } catch (error) {
+    res.status(400).json({ success: false, code: 400, message: (error as Error).message })
+  }
+}
+
+/** 全文重新生成：全部章节重新合成，覆盖原有音频与字幕。fresh=true 时忽略音频缓存 */
+export async function regenerateAllHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    const fresh = req.body?.fresh === true
+    await regenerateAllChapters(req.params.id, fresh)
+    res.json({
+      success: true,
+      code: 200,
+      message: fresh ? '已开始全文重新生成（忽略缓存，全部重新合成）' : '已开始全文重新生成',
+    })
   } catch (error) {
     res.status(400).json({ success: false, code: 400, message: (error as Error).message })
   }
