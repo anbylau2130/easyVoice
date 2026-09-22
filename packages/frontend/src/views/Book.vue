@@ -713,6 +713,71 @@
         </p>
       </section>
 
+      <!-- 内嵌播放器：试听（角色音色试听，支持上一曲/下一曲） -->
+      <div v-if="hasCharacterVoices" class="inline-player">
+        <div class="player-row">
+          <span class="player-tag player-tag-preview">🎧 试听</span>
+          <el-button-group>
+            <el-button size="small" :icon="SkipBack" :disabled="!previewPlayerIndex" @click="previewPlayerPrev" />
+            <el-button
+              size="small"
+              type="primary"
+              :loading="previewLoadingCharacter !== ''"
+              :disabled="!filteredEditingVoices.length && previewPlayerIndex < 0"
+              @click="previewPlayerToggle"
+            >
+              <el-icon :size="14"><component :is="previewPlaying ? Pause : Play" /></el-icon>
+            </el-button>
+            <el-button size="small" :icon="SkipForward" :disabled="!filteredEditingVoices.length" @click="previewPlayerNext" />
+          </el-button-group>
+          <span class="player-title" :title="previewPlayerTitle">
+            {{ previewPlayerTitle || '点击角色表的 ▶ 试听，或按下一曲逐个试听' }}
+          </span>
+          <span class="player-time">{{ fmtTime(previewCurrentTime) }} / {{ fmtTime(previewDuration) }}</span>
+        </div>
+        <el-slider
+          class="player-slider"
+          :max="previewDuration || 1"
+          :step="0.1"
+          :model-value="previewCurrentTime"
+          size="small"
+          @input="previewSeek"
+        />
+        <div class="player-subtitle" v-if="previewSubtitle">{{ previewSubtitle }}</div>
+      </div>
+
+      <!-- 内嵌播放器：章节阅读（支持上一章/下一章、同步字幕） -->
+      <div class="inline-player">
+        <div class="player-row">
+          <span class="player-tag">📖 章节</span>
+          <el-button-group>
+            <el-button size="small" :icon="SkipBack" :disabled="!playableChapters.length" @click="chapterPlayerPrev" />
+            <el-button
+              size="small"
+              type="primary"
+              :disabled="!playableChapters.length"
+              @click="chapterPlayerToggle"
+            >
+              <el-icon :size="14"><component :is="chapterPlaying ? Pause : Play" /></el-icon>
+            </el-button>
+            <el-button size="small" :icon="SkipForward" :disabled="!playableChapters.length" @click="chapterPlayerNext" />
+          </el-button-group>
+          <span class="player-title" :title="chapterPlayerTitle">
+            {{ chapterPlayerTitle || '点击章节列表的「播放」，或按下一曲连续听书' }}
+          </span>
+          <span class="player-time">{{ fmtTime(chapterCurrentTime) }} / {{ fmtTime(chapterDuration) }}</span>
+        </div>
+        <el-slider
+          class="player-slider"
+          :max="chapterDuration || 1"
+          :step="0.1"
+          :model-value="chapterCurrentTime"
+          size="small"
+          @input="chapterSeek"
+        />
+        <div class="player-subtitle" v-if="chapterSubtitle">{{ chapterSubtitle }}</div>
+      </div>
+
       <el-table
         :data="bookDetail?.chapters || []"
         class="chapter-table"
@@ -764,21 +829,6 @@
         </el-table-column>
       </el-table>
     </section>
-
-    <el-dialog
-      v-model="playerVisible"
-      :title="playingTitle"
-      width="520px"
-      @closed="playingUrl = ''"
-    >
-      <audio
-        v-if="playingUrl"
-        :src="playingUrl"
-        controls
-        autoplay
-        style="width: 100%"
-      ></audio>
-    </el-dialog>
   </div>
 </template>
 
@@ -810,7 +860,7 @@ import {
   type VoicePreset,
   type VcInfo,
 } from '@/api/voices'
-import { LoaderCircle, Search } from 'lucide-vue-next'
+import { LoaderCircle, Search, Play, Pause, SkipBack, SkipForward } from 'lucide-vue-next'
 import {
   chapterAudioUrl,
   chapterSrtUrl,
@@ -872,9 +922,20 @@ const LAST_BOOK_KEY = 'easyvoice:lastBookId'
 const nowTick = ref(Date.now())
 let tickTimer: ReturnType<typeof setInterval> | null = null
 
-const playerVisible = ref(false)
-const playingUrl = ref('')
-const playingTitle = ref('')
+// ===== 内嵌播放器状态（试听 / 章节阅读，替代旧的弹窗播放器）=====
+let previewAudioEl: HTMLAudioElement | null = null
+let previewObjectUrl = ''
+const previewPlayerIndex = ref(-1)
+const previewPlaying = ref(false)
+const previewCurrentTime = ref(0)
+const previewDuration = ref(0)
+let chapterAudioEl: HTMLAudioElement | null = null
+const chapterPlayerIndex = ref(-1)
+const chapterPlaying = ref(false)
+const chapterCurrentTime = ref(0)
+const chapterDuration = ref(0)
+const chapterSubtitle = ref('')
+let chapterCues: { start: number; end: number; text: string }[] = []
 
 const settingsOpen = ref(false)
 const llmForm = ref({ baseUrl: '', model: '', apiKey: '' })
@@ -1035,7 +1096,225 @@ async function downloadPreview(row: CharacterVoice) {
     downloadingCharacter.value = ''
   }
 }
-let previewAudio: HTMLAudioElement | null = null
+// ===== 试听/章节内嵌播放器 =====
+const playableChapters = computed(
+  () => bookDetail.value?.chapters.filter((c) => c.status === 'done') || []
+)
+
+function fmtTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '00:00'
+  const m = Math.floor(seconds / 60)
+  const s = Math.floor(seconds % 60)
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
+function parseSrt(text: string): { start: number; end: number; text: string }[] {
+  const toSeconds = (x: string): number => {
+    const [h, m, rest] = x.split(':')
+    const [sec, ms] = rest.split(',')
+    return Number(h) * 3600 + Number(m) * 60 + Number(sec) + Number(ms || 0) / 1000
+  }
+  const cues: { start: number; end: number; text: string }[] = []
+  for (const block of text.split(/\r?\n\r?\n/)) {
+    const lines = block.split(/\r?\n/).filter((l) => l.trim())
+    const timeLine = lines.find((l) => l.includes('-->'))
+    if (!timeLine) continue
+    const [s, e] = timeLine.split('-->').map((x) => x.trim())
+    const body = lines.filter((l) => !l.includes('-->') && !/^\d+$/.test(l.trim())).join(' ')
+    if (!body) continue
+    cues.push({ start: toSeconds(s), end: toSeconds(e), text: body })
+  }
+  return cues.sort((a, b) => a.start - b.start)
+}
+
+// --- 试听播放器 ---
+
+const previewPlayerTitle = computed(() => {
+  const row = filteredEditingVoices.value[previewPlayerIndex.value]
+  if (!row) return ''
+  const preset = voicePresets.value.find((p) => p.id === row.voice)
+  const source = isVcEngineBook.value && row.vcRef ? ` · ${row.vcRef}` : ''
+  return `${row.character} · ${preset ? preset.name : row.voice}${source}`
+})
+const previewSubtitle = computed(() => {
+  const row = filteredEditingVoices.value[previewPlayerIndex.value]
+  if (!row) return ''
+  return `我是${row.character}。${row.description || ''}`
+})
+
+function previewPlayerToggle() {
+  if (previewPlayerIndex.value < 0) {
+    if (filteredEditingVoices.value.length) void previewPlayerLoad(0)
+    return
+  }
+  const el = getPreviewAudio()
+  if (el.paused) void el.play().catch(() => ElMessage.error('浏览器无法播放该音频'))
+  else el.pause()
+}
+function previewPlayerNext() {
+  const total = filteredEditingVoices.value.length
+  if (!total) return
+  void previewPlayerLoad((previewPlayerIndex.value + 1) % total)
+}
+function previewPlayerPrev() {
+  const total = filteredEditingVoices.value.length
+  if (!total) return
+  void previewPlayerLoad((previewPlayerIndex.value - 1 + total) % total)
+}
+function previewSeek(value: number) {
+  const el = getPreviewAudio()
+  el.currentTime = value
+  previewCurrentTime.value = value
+}
+
+async function previewPlayerLoad(index: number) {
+  const row = filteredEditingVoices.value[index]
+  if (!row || !bookId.value) return
+  previewPlayerIndex.value = index
+  previewLoadingCharacter.value = row.character
+  const el = getPreviewAudio()
+  try {
+    // 若该行音色/换声源有未保存的修改，先静默保存，确保试听的就是最终效果
+    if (row.voice !== savedVoiceOf(row.character) || (row.vcRef || '') !== savedVcRefOf(row.character)) {
+      const ok = await handleSaveVoices(true)
+      if (!ok) return
+    }
+    const res = await fetch(characterPreviewUrl(bookId.value, row.character), {
+      signal: AbortSignal.timeout(120_000),
+    })
+    const contentType = res.headers.get('content-type') || ''
+    if (!res.ok || !contentType.includes('audio')) {
+      // 后端返回的错误信息（如克隆服务未配置）直接透出
+      let message = `试听失败（HTTP ${res.status}）`
+      try {
+        const err = await res.json()
+        if (err?.message) message = err.message
+      } catch {
+        // 非 JSON 错误体
+      }
+      throw new Error(message)
+    }
+    const blob = await res.blob()
+    if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl)
+    previewObjectUrl = URL.createObjectURL(blob)
+    el.src = previewObjectUrl
+    chapterAudioEl?.pause()
+    await el.play().catch(() => ElMessage.error('浏览器无法播放该音频'))
+  } catch (error) {
+    ElMessage.error((error as Error).message || '试听失败，请稍后重试')
+  } finally {
+    previewLoadingCharacter.value = ''
+  }
+}
+
+// --- 章节播放器 ---
+const chapterPlayerTitle = computed(() => {
+  const ch = playableChapters.value[chapterPlayerIndex.value]
+  if (!ch) return ''
+  return `${ch.index + 1}. ${ch.title}`
+})
+
+async function loadChapterSubtitle(chapterIndex: number) {
+  chapterCues = []
+  chapterSubtitle.value = ''
+  if (!bookId.value) return
+  try {
+    const res = await fetch(chapterSrtUrl(bookId.value, chapterIndex))
+    chapterCues = parseSrt(await res.text())
+  } catch {
+    // 字幕缺失不阻塞播放
+  }
+}
+
+function chapterPlayerToggle() {
+  if (chapterPlayerIndex.value < 0) {
+    if (playableChapters.value.length) void chapterPlayerLoad(0)
+    return
+  }
+  const el = getChapterAudio()
+  if (el.paused) void el.play().catch(() => ElMessage.error('浏览器无法播放该音频'))
+  else el.pause()
+}
+function chapterPlayerNext() {
+  const total = playableChapters.value.length
+  if (!total) return
+  void chapterPlayerLoad((chapterPlayerIndex.value + 1) % total)
+}
+function chapterPlayerPrev() {
+  const total = playableChapters.value.length
+  if (!total) return
+  void chapterPlayerLoad((chapterPlayerIndex.value - 1 + total) % total)
+}
+function chapterSeek(value: number) {
+  const el = getChapterAudio()
+  el.currentTime = value
+  chapterCurrentTime.value = value
+}
+
+async function chapterPlayerLoad(index: number) {
+  const ch = playableChapters.value[index]
+  if (!ch || !bookId.value) return
+  chapterPlayerIndex.value = index
+  const el = getChapterAudio()
+  el.src = chapterAudioUrl(bookId.value, ch.index)
+  void loadChapterSubtitle(ch.index)
+  previewAudioEl?.pause()
+  await el.play().catch(() => ElMessage.error('浏览器无法播放该音频'))
+}
+
+function getPreviewAudio(): HTMLAudioElement {
+  if (!previewAudioEl) {
+    previewAudioEl = new Audio()
+    previewAudioEl.preload = 'auto'
+    previewAudioEl.addEventListener('timeupdate', () => {
+      previewCurrentTime.value = previewAudioEl?.currentTime ?? 0
+    })
+    previewAudioEl.addEventListener('loadedmetadata', () => {
+      previewDuration.value = previewAudioEl?.duration || 0
+    })
+    previewAudioEl.addEventListener('play', () => {
+      previewPlaying.value = true
+      chapterAudioEl?.pause()
+    })
+    previewAudioEl.addEventListener('pause', () => {
+      previewPlaying.value = false
+    })
+    previewAudioEl.addEventListener('ended', () => {
+      previewPlaying.value = false
+      previewPlayerNext() // 自动播放下一曲，循环试听整个角色列表
+    })
+  }
+  return previewAudioEl
+}
+
+function getChapterAudio(): HTMLAudioElement {
+  if (!chapterAudioEl) {
+    chapterAudioEl = new Audio()
+    chapterAudioEl.preload = 'auto'
+    chapterAudioEl.addEventListener('timeupdate', () => {
+      chapterCurrentTime.value = chapterAudioEl?.currentTime ?? 0
+      // 按播放进度同步字幕：命中区间则刷新，未命中保留上一句直到进入下一句
+      const t = chapterCurrentTime.value
+      const cue = chapterCues.find((c) => t >= c.start && t <= c.end)
+      if (cue) chapterSubtitle.value = cue.text
+    })
+    chapterAudioEl.addEventListener('loadedmetadata', () => {
+      chapterDuration.value = chapterAudioEl?.duration || 0
+    })
+    chapterAudioEl.addEventListener('play', () => {
+      chapterPlaying.value = true
+      previewAudioEl?.pause()
+    })
+    chapterAudioEl.addEventListener('pause', () => {
+      chapterPlaying.value = false
+    })
+    chapterAudioEl.addEventListener('ended', () => {
+      chapterPlaying.value = false
+      chapterPlayerNext() // 自动连播下一章
+    })
+  }
+  return chapterAudioEl
+}
 
 // 自定义音色（声音克隆）
 const customVoices = ref<CustomVoice[]>([])
@@ -1423,40 +1702,9 @@ async function handleSaveVoices(silent = false): Promise<boolean> {
 }
 
 async function previewVoice(row: CharacterVoice) {
-  if (!bookId.value) return
-  previewLoadingCharacter.value = row.character
-  try {
-    // 若该行音色或换声源有未保存的修改，先静默保存，确保试听的就是最终效果
-    if (row.voice !== savedVoiceOf(row.character) || (row.vcRef || '') !== savedVcRefOf(row.character)) {
-      const ok = await handleSaveVoices(true)
-      if (!ok) return
-    }
-    const res = await fetch(characterPreviewUrl(bookId.value, row.character), {
-      signal: AbortSignal.timeout(60_000),
-    })
-    const contentType = res.headers.get('content-type') || ''
-    if (!res.ok || !contentType.includes('audio')) {
-      // 后端返回的错误信息（如克隆服务未配置）直接透出
-      let message = `试听失败（HTTP ${res.status}）`
-      try {
-        const err = await res.json()
-        if (err?.message) message = err.message
-      } catch {
-        // 非 JSON 错误体
-      }
-      throw new Error(message)
-    }
-    const blob = await res.blob()
-    previewAudio?.pause()
-    const audio = new Audio(URL.createObjectURL(blob))
-    previewAudio = audio
-    audio.onended = () => URL.revokeObjectURL(audio.src)
-    audio.play().catch(() => ElMessage.error('浏览器无法播放该音频'))
-  } catch (error) {
-    ElMessage.error((error as Error).message || '试听失败，请稍后重试')
-  } finally {
-    previewLoadingCharacter.value = ''
-  }
+  const index = filteredEditingVoices.value.findIndex((r) => r.character === row.character)
+  if (index < 0) return
+  await previewPlayerLoad(index)
 }
 
 async function loadVoiceList() {
@@ -1828,10 +2076,9 @@ function stopPolling() {
 }
 
 function playChapter(row: { index: number; title: string }) {
-  if (!bookId.value) return
-  playingUrl.value = chapterAudioUrl(bookId.value, row.index)
-  playingTitle.value = row.title
-  playerVisible.value = true
+  const index = playableChapters.value.findIndex((c) => c.index === row.index)
+  if (index < 0) return
+  void chapterPlayerLoad(index)
 }
 
 async function loadLlmSettings() {
@@ -1916,7 +2163,8 @@ onBeforeUnmount(() => {
     clearInterval(tickTimer)
     tickTimer = null
   }
-  previewAudio?.pause()
+  previewAudioEl?.pause()
+  chapterAudioEl?.pause()
   presetAudio?.pause()
 })
 </script>
@@ -2113,6 +2361,56 @@ onBeforeUnmount(() => {
     }
     .batch-select {
       width: 210px;
+    }
+  }
+  .inline-player {
+    margin-top: 14px;
+    padding: 10px 14px;
+    background: rgba(255, 255, 255, 0.7);
+    border-radius: 10px;
+    .player-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .player-tag {
+      flex-shrink: 0;
+      padding: 2px 8px;
+      background: #409eff;
+      color: #fff;
+      border-radius: 4px;
+      font-size: 12px;
+      &.player-tag-preview {
+        background: #e6a23c;
+      }
+    }
+    .player-title {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 13px;
+      color: #333;
+    }
+    .player-time {
+      flex-shrink: 0;
+      color: #999;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    .player-slider {
+      margin: 6px 0 0;
+    }
+    .player-subtitle {
+      margin-top: 6px;
+      color: #666;
+      font-size: 12px;
+      line-height: 1.6;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
     }
   }
   .character-head {
