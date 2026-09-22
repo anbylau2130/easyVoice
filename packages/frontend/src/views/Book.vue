@@ -1038,11 +1038,21 @@ async function applyBatchVoices() {
   batchApplying.value = true
   try {
     const unbindVc = batchVcRef.value === '__unbind__'
-    for (const row of rows) {
+    // 按角色名在"最新"的 editingVoices 上应用修改：勾选行的对象引用可能已被
+    // 轮询刷新整体替换，直接改勾选行的引用会改到失效副本上导致保存不生效
+    const selectedNames = new Set(rows.map((r) => r.character))
+    let changed = 0
+    for (const row of editingVoices.value) {
+      if (!selectedNames.has(row.character)) continue
       if (batchVoice.value) row.voice = batchVoice.value
       if (isVcEngineBook.value && batchVcRef.value) {
         row.vcRef = unbindVc ? '' : batchVcRef.value
       }
+      changed++
+    }
+    if (!changed) {
+      ElMessage.warning('选中的角色已不在列表中，请重新勾选后再应用')
+      return
     }
     voicesDirty.value = true
     const ok = await handleSaveVoices(true)
