@@ -589,6 +589,38 @@
             保存音色修改
           </el-button>
         </div>
+        <!-- 内嵌播放器：试听（角色音色试听，支持上一曲/下一曲） -->
+        <div class="inline-player">
+          <div class="player-row">
+            <span class="player-tag player-tag-preview">🎧 试听</span>
+            <el-button-group>
+              <el-button size="small" :icon="SkipBack" :disabled="!previewPlayerIndex" @click="previewPlayerPrev" />
+              <el-button
+                size="small"
+                type="primary"
+                :loading="previewLoadingCharacter !== ''"
+                :disabled="!filteredEditingVoices.length && previewPlayerIndex < 0"
+                @click="previewPlayerToggle"
+              >
+                <el-icon :size="14"><component :is="previewPlaying ? Pause : Play" /></el-icon>
+              </el-button>
+              <el-button size="small" :icon="SkipForward" :disabled="!filteredEditingVoices.length" @click="previewPlayerNext" />
+            </el-button-group>
+            <span class="player-title" :title="previewPlayerTitle">
+              {{ previewPlayerTitle || '点击角色表的 ▶ 试听，或按下一曲逐个试听' }}
+            </span>
+            <span class="player-time">{{ fmtTime(previewCurrentTime) }} / {{ fmtTime(previewDuration) }}</span>
+          </div>
+          <el-slider
+            class="player-slider"
+            :max="previewDuration || 1"
+            :step="0.1"
+            :model-value="previewCurrentTime"
+            size="small"
+            @input="previewSeek"
+          />
+          <div class="player-subtitle" v-if="previewSubtitle">{{ previewSubtitle }}</div>
+        </div>
         <!-- 批量设置：勾选角色后统一应用音色/换声源 -->
         <div v-if="selectedVoiceRows.length" class="batch-bar">
           <span class="batch-count">已选 {{ selectedVoiceRows.length }} 个角色</span>
@@ -712,39 +744,6 @@
           试听内容为 AI 生成的角色性格自述；修改音色后请先「保存音色修改」再试听。确认满意后点「开始生成有声书」。
         </p>
       </section>
-
-      <!-- 内嵌播放器：试听（角色音色试听，支持上一曲/下一曲） -->
-      <div v-if="hasCharacterVoices" class="inline-player">
-        <div class="player-row">
-          <span class="player-tag player-tag-preview">🎧 试听</span>
-          <el-button-group>
-            <el-button size="small" :icon="SkipBack" :disabled="!previewPlayerIndex" @click="previewPlayerPrev" />
-            <el-button
-              size="small"
-              type="primary"
-              :loading="previewLoadingCharacter !== ''"
-              :disabled="!filteredEditingVoices.length && previewPlayerIndex < 0"
-              @click="previewPlayerToggle"
-            >
-              <el-icon :size="14"><component :is="previewPlaying ? Pause : Play" /></el-icon>
-            </el-button>
-            <el-button size="small" :icon="SkipForward" :disabled="!filteredEditingVoices.length" @click="previewPlayerNext" />
-          </el-button-group>
-          <span class="player-title" :title="previewPlayerTitle">
-            {{ previewPlayerTitle || '点击角色表的 ▶ 试听，或按下一曲逐个试听' }}
-          </span>
-          <span class="player-time">{{ fmtTime(previewCurrentTime) }} / {{ fmtTime(previewDuration) }}</span>
-        </div>
-        <el-slider
-          class="player-slider"
-          :max="previewDuration || 1"
-          :step="0.1"
-          :model-value="previewCurrentTime"
-          size="small"
-          @input="previewSeek"
-        />
-        <div class="player-subtitle" v-if="previewSubtitle">{{ previewSubtitle }}</div>
-      </div>
 
       <!-- 内嵌播放器：章节阅读（支持上一章/下一章、同步字幕） -->
       <div class="inline-player">
@@ -2379,56 +2378,6 @@ onBeforeUnmount(() => {
       width: 210px;
     }
   }
-  .inline-player {
-    margin-top: 14px;
-    padding: 10px 14px;
-    background: rgba(255, 255, 255, 0.7);
-    border-radius: 10px;
-    .player-row {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-    .player-tag {
-      flex-shrink: 0;
-      padding: 2px 8px;
-      background: #409eff;
-      color: #fff;
-      border-radius: 4px;
-      font-size: 12px;
-      &.player-tag-preview {
-        background: #e6a23c;
-      }
-    }
-    .player-title {
-      flex: 1;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-size: 13px;
-      color: #333;
-    }
-    .player-time {
-      flex-shrink: 0;
-      color: #999;
-      font-size: 12px;
-      font-variant-numeric: tabular-nums;
-    }
-    .player-slider {
-      margin: 6px 0 0;
-    }
-    .player-subtitle {
-      margin-top: 6px;
-      color: #666;
-      font-size: 12px;
-      line-height: 1.6;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
-    }
-  }
   .character-head {
     display: flex;
     align-items: center;
@@ -2447,6 +2396,56 @@ onBeforeUnmount(() => {
   .voice-name {
     color: #999;
     font-size: 12px;
+  }
+}
+.inline-player {
+  margin-top: 14px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: 10px;
+  .player-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .player-tag {
+    flex-shrink: 0;
+    padding: 2px 8px;
+    background: #409eff;
+    color: #fff;
+    border-radius: 4px;
+    font-size: 12px;
+    &.player-tag-preview {
+      background: #e6a23c;
+    }
+  }
+  .player-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+    color: #333;
+  }
+  .player-time {
+    flex-shrink: 0;
+    color: #999;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .player-slider {
+    margin: 6px 0 0;
+  }
+  .player-subtitle {
+    margin-top: 6px;
+    color: #666;
+    font-size: 12px;
+    line-height: 1.6;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
 }
 .character-tip {
