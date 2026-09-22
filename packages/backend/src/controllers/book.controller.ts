@@ -13,6 +13,7 @@ import {
   pauseBook,
   resumeBook,
   retryFailedChapters,
+  regenerateChapter,
   chapterFilePath,
   bookOutputDir,
   planBookVoices,
@@ -159,6 +160,21 @@ export async function retryFailedHandler(req: Request, res: Response, next: Next
   try {
     await retryFailedChapters(req.params.id)
     res.json({ success: true, code: 200, message: '已开始重试失败章节' })
+  } catch (error) {
+    res.status(400).json({ success: false, code: 400, message: (error as Error).message })
+  }
+}
+
+/** 单章重新生成：仅重新合成指定章节，覆盖原有音频与字幕 */
+export async function regenerateChapterHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    const index = Number(req.params.index)
+    if (!Number.isInteger(index) || index < 0) {
+      res.status(400).json({ success: false, code: 400, message: '无效的章节序号' })
+      return
+    }
+    await regenerateChapter(req.params.id, index)
+    res.json({ success: true, code: 200, message: '已开始重新生成该章节' })
   } catch (error) {
     res.status(400).json({ success: false, code: 400, message: (error as Error).message })
   }

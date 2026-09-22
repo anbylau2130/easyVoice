@@ -181,6 +181,17 @@ export const retryFailedChapters = async (id: string) => {
   return response.data?.message
 }
 
+/** 单章重新生成：覆盖该章节现有音频与字幕（已完成/失败章节均可） */
+export const regenerateChapter = async (id: string, index: number) => {
+  const response = await api.post<{ success: boolean; code: number; message?: string }>(
+    `/${id}/chapters/${index}/regenerate`
+  )
+  if (response.data?.code !== 200) {
+    throw new Error(response.data?.message || '重新生成失败')
+  }
+  return response.data?.message
+}
+
 export const deleteBook = async (id: string) => {
   const response = await api.delete<{ success: boolean; code: number; message?: string }>(`/${id}`)
   if (response.data?.code !== 200) {

@@ -7,6 +7,7 @@ import {
   pauseBookHandler,
   resumeBookHandler,
   retryFailedHandler,
+  regenerateChapterHandler,
   deleteBookHandler,
   updateSelectionHandler,
   chapterAudioHandler,
@@ -31,6 +32,7 @@ router.get('/:id', getBookHandler)
 router.post('/:id/pause', pauseBookHandler)
 router.post('/:id/resume', resumeBookHandler)
 router.post('/:id/retryFailed', retryFailedHandler)
+router.post('/:id/chapters/:index/regenerate', regenerateChapterHandler)
 router.delete('/:id', deleteBookHandler)
 router.get('/:id/chapter/:index/audio', chapterAudioHandler)
 router.get('/:id/chapter/:index/srt', chapterSrtHandler)

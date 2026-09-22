@@ -254,7 +254,7 @@ export async function startBook(id: string): Promise<void> {
   }
 }
 
-async function runBookLoop(book: Book): Promise<void> {
+async function runBookLoop(book: Book, onlyIndexes?: Set<number>): Promise<void> {
   // 落盘前必须重读最新书籍、只合并本章跟踪字段：角色表可能被外部并发修改
   // （重新规划、手动修正音色等），禁止用启动时的陈旧对象整体覆盖回去
   const saveChapterState = async (chapter: BookChapter) => {
@@ -276,6 +276,7 @@ async function runBookLoop(book: Book): Promise<void> {
   try {
     for (const chapter of book.chapters) {
       if (pauseRequested.has(book.id)) break
+      if (onlyIndexes && !onlyIndexes.has(chapter.index)) continue
       if (!isChapterRunnable(chapter)) continue
       // 正文按需读取：每章处理时才读对应文件
       const content = await readChapterContent(book.id, chapter.index)
@@ -533,6 +534,48 @@ export async function deleteBook(id: string): Promise<void> {
 /** 书的输出目录（绝对路径），供前端展示 */
 export function bookOutputDir(id: string): string {
   return bookDir(id)
+}
+
+/**
+ * 单章重新生成：仅重新合成指定章节（已完成/失败均可），覆盖原有音频与字幕。
+ * 与全局生成互斥；进行中的书需先暂停。片段缓存仍生效——已成功且参数未变的片段
+ * 秒级复用，仅参数变化或此前失败的片段会真正重新合成。
+ */
+export async function regenerateChapter(id: string, index: number): Promise<void> {
+  if (!BOOK_ID_PATTERN.test(id)) throw new Error('无效的有声书 ID')
+  if (!Number.isInteger(index) || index < 0) throw new Error('无效的章节序号')
+  if (runningIds.size > 0) throw new Error('已有有声书任务进行中，请等待完成或暂停后再试')
+  const book = await loadBook(id)
+  if (!book) throw new Error('有声书不存在')
+  const chapter = book.chapters.find((c) => c.index === index)
+  if (!chapter) throw new Error('章节不存在')
+  if (book.params.useLLM && !book.characterVoices?.length) {
+    throw new Error('请先生成角色音色规划，再重新生成章节')
+  }
+
+  runningIds.add(id)
+  pauseRequested.delete(id)
+  try {
+    // 状态落盘后交给通用生成循环（带 onlyIndexes 过滤，只跑这一章）
+    const fresh = await loadBook(id)
+    if (!fresh) throw new Error('有声书不存在')
+    fresh.status = 'running'
+    fresh.message = undefined
+    const target = fresh.chapters.find((c) => c.index === index)
+    if (target) {
+      target.status = 'pending'
+      target.error = null
+      target.progress = 0
+    }
+    await saveBook(fresh)
+    logger.info(`Regenerating chapter ${index} of book ${id}`)
+    void runBookLoop(fresh, new Set([index])).catch((err) => {
+      logger.error(`Chapter regeneration crashed: ${(err as Error).message}`)
+    })
+  } catch (err) {
+    runningIds.delete(id)
+    throw err
+  }
 }
 
 /**

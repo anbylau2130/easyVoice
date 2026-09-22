@@ -818,7 +818,7 @@
             <el-tag :type="chapterStatusType(row.status)">{{ chapterStatusText(row.status) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="160">
+        <el-table-column label="操作" width="200">
           <template #default="{ row }">
             <template v-if="row.status === 'done'">
               <el-button type="primary" link @click="playChapter(row)">播放</el-button>
@@ -828,7 +828,24 @@
               <a :href="chapterSrtUrl(bookId!, row.index)" :download="`${row.title}.srt`">
                 <el-button type="info" link>字幕</el-button>
               </a>
+              <el-button
+                type="warning"
+                link
+                :disabled="regeneratingIndex !== null"
+                @click="handleRegenerateChapter(row)"
+              >
+                {{ regeneratingIndex === row.index ? '生成中' : '重新生成' }}
+              </el-button>
             </template>
+            <el-button
+              v-else-if="row.status === 'failed'"
+              type="warning"
+              link
+              :disabled="regeneratingIndex !== null"
+              @click="handleRegenerateChapter(row)"
+            >
+              {{ regeneratingIndex === row.index ? '生成中' : '重新生成' }}
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -880,9 +897,11 @@ import {
   stopPlanVoices,
   resumeBook,
   retryFailedChapters,
+  regenerateChapter,
   saveCharacterVoices,
   type BookDetail,
   type BookSummary,
+  type BookChapter,
   type ChapterStatus,
   type CharacterVoice,
   type ParsedChapter,
@@ -2057,6 +2076,31 @@ async function handleResume() {
     await refreshDetail()
   } catch (error) {
     ElMessage.error((error as Error).message)
+  }
+}
+
+/** 单章重新生成：覆盖该章节音频（用于修复缺段/重复或应用新音色后单独刷新） */
+const regeneratingIndex = ref<number | null>(null)
+async function handleRegenerateChapter(row: BookChapter) {
+  if (!bookId.value) return
+  try {
+    await ElMessageBox.confirm(
+      `确定重新生成「${row.title}」吗？该章节现有音频与字幕将被覆盖。`,
+      '重新生成章节',
+      { type: 'warning', confirmButtonText: '重新生成', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  regeneratingIndex.value = row.index
+  try {
+    await regenerateChapter(bookId.value, row.index)
+    ElMessage.success('已开始重新生成该章节')
+    await refreshDetail()
+  } catch (error) {
+    ElMessage.error((error as Error).message || '重新生成失败')
+  } finally {
+    regeneratingIndex.value = null
   }
 }
 
