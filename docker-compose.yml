@@ -42,6 +42,9 @@ services:
     restart: unless-stopped
     ports:
       - '3000:3000'
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
     environment:
       - NODE_ENV=production
       - PORT=3000
@@ -91,6 +94,9 @@ services:
     profiles: ['clone']
     ports:
       - '8020:8020'
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
     environment:
       # 国内网络模型下载加速；首次启动下载约 1.8GB
       - HF_ENDPOINT=https://hf-mirror.com
@@ -110,6 +116,9 @@ services:
     profiles: ['vc']
     ports:
       - '9090:9090'
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
     environment:
       - HF_ENDPOINT=https://hf-mirror.com
     volumes:
@@ -128,6 +137,9 @@ services:
     profiles: ['rvc']
     ports:
       - '9091:9091'
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
     environment:
       - HF_ENDPOINT=https://hf-mirror.com
     volumes:
