@@ -589,7 +589,55 @@
             保存音色修改
           </el-button>
         </div>
-        <el-table :data="filteredEditingVoices" size="small" max-height="260" row-key="character">
+        <!-- 批量设置：勾选角色后统一应用音色/换声源 -->
+        <div v-if="selectedVoiceRows.length" class="batch-bar">
+          <span class="batch-count">已选 {{ selectedVoiceRows.length }} 个角色</span>
+          <el-select
+            v-model="batchVoice"
+            size="small"
+            clearable
+            filterable
+            placeholder="不修改音色"
+            class="batch-select"
+          >
+            <el-option
+              v-for="v in voiceOptions"
+              :key="v.Name"
+              :label="v.cnName ? `${v.cnName} (${v.Name})` : v.Name"
+              :value="v.Name"
+            />
+          </el-select>
+          <el-select
+            v-if="isVcEngineBook"
+            v-model="batchVcRef"
+            size="small"
+            filterable
+            placeholder="不修改换声源"
+            class="batch-select"
+          >
+            <el-option label="— 解绑换声源（用基础音色）—" value="__unbind__" />
+            <el-option v-for="name in vcRefOptions" :key="name" :label="name" :value="name" />
+          </el-select>
+          <el-button
+            type="primary"
+            size="small"
+            :loading="batchApplying"
+            :disabled="!batchVoice && !batchVcRef"
+            @click="applyBatchVoices"
+          >
+            应用到选中角色
+          </el-button>
+          <el-button size="small" @click="clearVoiceSelection">取消选择</el-button>
+        </div>
+        <el-table
+          ref="voiceTableRef"
+          :data="filteredEditingVoices"
+          size="small"
+          max-height="260"
+          row-key="character"
+          @selection-change="handleVoiceSelectionChange"
+        >
+          <el-table-column type="selection" width="38" reserve-selection />
           <el-table-column prop="character" label="角色" width="120" />
           <el-table-column label="对白" width="70">
             <template #default="{ row }">
@@ -903,6 +951,52 @@ const filteredEditingVoices = computed(() => {
   )
 })
 const voicesDirty = ref(false)
+// ===== 批量设置音色/换声源：勾选多个角色后统一应用 =====
+const voiceTableRef = ref()
+const selectedVoiceRows = ref<CharacterVoice[]>([])
+const batchVoice = ref('')
+const batchVcRef = ref('')
+const batchApplying = ref(false)
+
+function handleVoiceSelectionChange(rows: CharacterVoice[]) {
+  selectedVoiceRows.value = rows
+}
+
+function clearVoiceSelection() {
+  voiceTableRef.value?.clearSelection()
+  selectedVoiceRows.value = []
+}
+
+async function applyBatchVoices() {
+  const rows = selectedVoiceRows.value
+  if (!rows.length) return
+  if (!batchVoice.value && !batchVcRef.value) {
+    ElMessage.warning('请先选择要批量应用的音色或换声源')
+    return
+  }
+  batchApplying.value = true
+  try {
+    const unbindVc = batchVcRef.value === '__unbind__'
+    for (const row of rows) {
+      if (batchVoice.value) row.voice = batchVoice.value
+      if (isVcEngineBook.value && batchVcRef.value) {
+        row.vcRef = unbindVc ? undefined : batchVcRef.value
+      }
+    }
+    voicesDirty.value = true
+    const ok = await handleSaveVoices(true)
+    if (ok) {
+      ElMessage.success(`已批量更新 ${rows.length} 个角色并保存`)
+      clearVoiceSelection()
+      batchVoice.value = ''
+      batchVcRef.value = ''
+    } else {
+      ElMessage.warning('应用成功但保存失败，请检查后手动点击「保存音色修改」')
+    }
+  } finally {
+    batchApplying.value = false
+  }
+}
 const savingVoices = ref(false)
 const previewLoadingCharacter = ref('')
 /** 试听下载：与试听同链路合成/换声，由浏览器保存为文件（服务端不落盘） */
@@ -2004,6 +2098,23 @@ onBeforeUnmount(() => {
   padding: 14px;
   background: rgba(255, 255, 255, 0.7);
   border-radius: 10px;
+  .batch-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    padding: 6px 10px;
+    background: rgba(64, 158, 255, 0.08);
+    border-radius: 6px;
+    .batch-count {
+      color: #409eff;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .batch-select {
+      width: 210px;
+    }
+  }
   .character-head {
     display: flex;
     align-items: center;

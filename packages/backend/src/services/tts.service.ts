@@ -154,6 +154,9 @@ const buildFinal = async (finalSegments: TTSResult[], id: string) => {
   return {
     audio: `${STATIC_DOMAIN}/${id}`,
     srt: `${STATIC_DOMAIN}/${id.replace('.mp3', '.srt')}`,
+    // 关键：多分段合并时必须聚合各分段的 partial 标记。
+    // 丢失它会让"缺片段"的长章节被标记为已完成，成品电子书静默缺失内容
+    partial: finalSegments.some((segment) => segment.partial),
   }
 }
 /**
@@ -238,58 +241,79 @@ async function buildSegmentList(
   const getProgress = () => {
     return Number((((handledLength / length) * 100) / (id.includes('segment') ? 2 : 1)).toFixed(2))
   }
-  const tasks = segments.map((segment, index) => async () => {
-    const { text, pitch, voice, rate, volume, vcRef } = segment
-    const vcOptions = isVcEngine(voiceEngine) && vcRef ? { engine: voiceEngine, ref: vcRef } : undefined
-    const output = path.resolve(tmpDirPath, `${index + 1}_splits.mp3`)
-    const cacheKey = taskManager.generateTaskId({
-      text,
-      pitch,
-      voice,
-      rate,
-      volume,
-      vcEngine: vcOptions?.engine,
-      vcRef: vcOptions?.ref,
-    })
-    const cache = await audioCacheInstance.getAudio(cacheKey)
-    if (cache && (await isCacheEntryUsable(cache))) {
-      logger.info(`Cache hit[segments]: ${voice} ${text.slice(0, 10)}`)
-      fileList.push(cache.audio)
-      handledLength++
-      onProgress?.(handledLength, length)
-      return cache
+  // 失败片段多轮自动补齐：Edge 偶发断流（1006 等）多为瞬时故障，逐轮退避重试，
+  // 保证章节音频内容完整——绝不允许"缺段"的有声书；仍失败的章节标记 partial，
+  // 由章节级重试兜底（已成功的片段走缓存，重试代价极小）
+  const MAX_ROUNDS = 4
+  let pending = segments.map((segment, index) => ({ segment, index }))
+  let round = 0
+  while (pending.length && round < MAX_ROUNDS) {
+    if (round > 0) {
+      const backoffMs = 3000 * round
+      logger.warn(
+        `Retrying ${pending.length} failed segment(s) of ${id} (round ${round + 1}/${MAX_ROUNDS}) after ${backoffMs}ms`
+      )
+      await new Promise((resolve) => setTimeout(resolve, backoffMs))
     }
-    const result = await generateSingleVoice({
-      text,
-      pitch,
-      voice,
-      rate,
-      volume,
-      output,
-    })
-    logger.debug(`Cache miss and generate audio: ${result.audio}, ${result.srt}`)
-    // 音色转换：edge 合成的基础音频 → vc-server 频谱换声；失败时回落原声（不中断整章生成）
-    let audioFile = result.audio
-    if (vcOptions) {
-      try {
-        audioFile = await convertAudioFile(output, vcOptions)
-      } catch (err) {
-        logger.warn(`Voice conversion failed (${vcOptions.ref}), using base voice: ${(err as Error).message}`)
+    const tasks = pending.map(({ segment, index }) => async () => {
+      const { text, pitch, voice, rate, volume, vcRef } = segment
+      const vcOptions = isVcEngine(voiceEngine) && vcRef ? { engine: voiceEngine, ref: vcRef } : undefined
+      const output = path.resolve(tmpDirPath, `${index + 1}_splits.mp3`)
+      const cacheKey = taskManager.generateTaskId({
+        text,
+        pitch,
+        voice,
+        rate,
+        volume,
+        vcEngine: vcOptions?.engine,
+        vcRef: vcOptions?.ref,
+      })
+      const cache = await audioCacheInstance.getAudio(cacheKey)
+      if (cache && (await isCacheEntryUsable(cache))) {
+        logger.info(`Cache hit[segments]: ${voice} ${text.slice(0, 10)}`)
+        fileList.push(cache.audio)
+        handledLength++
+        onProgress?.(handledLength, length)
+        return cache
       }
+      const result = await generateSingleVoice({
+        text,
+        pitch,
+        voice,
+        rate,
+        volume,
+        output,
+      })
+      logger.debug(`Cache miss and generate audio: ${result.audio}, ${result.srt}`)
+      // 音色转换：edge 合成的基础音频 → vc-server 频谱换声；失败时回落原声（不中断整章生成）
+      let audioFile = result.audio
+      if (vcOptions) {
+        try {
+          audioFile = await convertAudioFile(output, vcOptions)
+        } catch (err) {
+          logger.warn(`Voice conversion failed (${vcOptions.ref}), using base voice: ${(err as Error).message}`)
+        }
+      }
+      fileList.push(audioFile)
+      handledLength++
+      task?.updateProgress?.(task.id, getProgress())
+      onProgress?.(handledLength, length)
+      const params = { text, pitch, voice, rate, volume }
+      await audioCacheInstance.setAudio(cacheKey, { ...params, ...result, audio: audioFile })
+      return result
+    })
+    const results = await runConcurrentTasks(tasks, EDGE_API_LIMIT)
+    // 从待补齐列表中移除本轮成功的片段（倒序 splice 保持索引对齐）
+    for (let i = pending.length - 1; i >= 0; i--) {
+      if (results?.[i]?.success) pending.splice(i, 1)
     }
-    fileList.push(audioFile)
-    handledLength++
-    task?.updateProgress?.(task.id, getProgress())
-    onProgress?.(handledLength, length)
-    const params = { text, pitch, voice, rate, volume }
-    await audioCacheInstance.setAudio(cacheKey, { ...params, ...result, audio: audioFile })
-    return result
-  })
-  let partial = false
-  const results = await runConcurrentTasks(tasks, EDGE_API_LIMIT)
-  if (results?.some((result) => !result.success)) {
-    logger.warn(`Partial result detected, some splits generated audio failed!`, results)
-    partial = true
+    round++
+  }
+  const partial = pending.length > 0
+  if (partial) {
+    logger.error(
+      `Chapter ${id}: ${pending.length} segment(s) still failed after ${MAX_ROUNDS} rounds, chapter marked partial`
+    )
   }
   // 段间停顿：Edge 免费端点不支持 SSML break，改为拼接时插入真实静音。
   // 说话人切换停顿更长（520ms），同一说话人较短（260ms），末段不加
