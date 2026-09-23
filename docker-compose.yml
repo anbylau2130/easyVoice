@@ -5,7 +5,7 @@
 #   Windows 双击 deploy.bat；Linux/macOS 执行 bash deploy.sh
 #   等价于：docker compose --profile vc --profile rvc up -d --build
 #   首次构建约 10-20 分钟（rvc-server 需源码编译）
-#   RVC 音色模型随仓库自带（rvc-models/），可自行增删
+#   RVC 模型不入库（体积原因）：自行下载放入 rvc-models/（见 rvc-models/README.txt）
 #
 # 【方式一：仅主服务（仅 Edge 预设配音）】
 #   docker compose up -d --build

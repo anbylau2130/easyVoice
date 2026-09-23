@@ -73,7 +73,7 @@ docker compose --profile vc --profile rvc up -d --build
 说明：
 
 - 首次构建约 10-20 分钟（rvc-server 需源码编译），之后启动很快
-- RVC 音色模型随仓库自带（`rvc-models/`），把 `<模型名>/<模型名>.pth`（+ 可选同名 `.index`）放进该目录即可新增音色
+- RVC 模型不随仓库分发（51 个 .pth 约 3GB，曾致仓库无法 clone）：自行下载放入 `rvc-models/`（`<模型名>/<模型名>.pth` + 可选同名 `.index`），来源见 `rvc-models/README.txt`
 - 持久化数据统一映射在 `docker-data/` 目录（生成的音频、模型权重、服务配置），备份迁移直接拷贝即可；若之前用过命名卷版本，老数据不会自动迁移，可手动拷贝或让服务重新下载
 - AI 智能配音需要 LLM：部署前编辑 `.env`（可从 `.env.example` 复制）填写 `OPENAI_API_KEY`，或部署后在页面「AI 模型配置」卡片填写
 - 极简单容器运行（无换声服务，仅 Edge 预设配音）：
