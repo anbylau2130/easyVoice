@@ -4,6 +4,11 @@ import { EdgeTTS } from '../lib/node-edge-tts/edge-tts-fixed'
 import { fileExist, readJson, safeRunWithRetry } from '../utils'
 import { logger } from '../utils/logger'
 import { isCustomVoice, synthesizeCloneVoice } from './clone-tts.service'
+import {
+  generateOmniVoiceBuffer,
+  generateOmniVoiceSegment,
+  isOmniDesignedVoice,
+} from './vc.service'
 import { getVoicePreset, isPresetVoice } from './voicePreset.service'
 
 // 微软官方支持情感风格（mstts:express-as）的声音（按名称片段匹配）。
@@ -69,6 +74,22 @@ export async function runEdgeTTS({
       return synthesizeCloneVoice(text, voice, { rate, mode: 'buffer' })
     }
     return synthesizeCloneVoice(text, voice, { rate, mode: 'stream' })
+  }
+  // 设计的 Omni 音色（omni- 前缀）：路由到 OmniVoice 克隆合成（文本+声纹参考音频）。
+  // 与 custom- 一样按音色名路由，任何配音引擎下均可使用；
+  // 设计声纹的参考名即完整音色名（omni-<名字>.wav），不再剥离前缀
+  if (isOmniDesignedVoice(voice)) {
+    logger.info(`Omni designed voice synthesis: ${voice} (${text.length} chars, ${outputType})`)
+    if (outputType === 'file') {
+      await generateOmniVoiceSegment(text, { ref: voice, rate, output })
+      return {
+        audio: output,
+        srt: output.replace('.mp3', '.srt'),
+        file: '',
+      }
+    }
+    // buffer/stream 模式统一退化为整段合成（wav Buffer），调用方按字节流处理
+    return generateOmniVoiceBuffer(text, { ref: voice, rate })
   }
   // 自定义 Edge 音色预设：还原为基础音色并叠加预设的 语速/音调/音量/风格
   if (isPresetVoice(voice)) {

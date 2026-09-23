@@ -4,12 +4,14 @@ import HomeView from '@/views/Home.vue'
 import AboutView from '@/views/About.vue'
 import Generate from '@/views/Generate.vue'
 import Book from '@/views/Book.vue'
+import VoiceDesign from '@/views/VoiceDesign.vue'
 import NotFound from '@/views/NotFound.vue'
 
 const routes = [
   { path: '/', component: HomeView },
   { path: '/generate', component: Generate },
   { path: '/book', component: Book },
+  { path: '/voice-design', component: VoiceDesign },
   { path: '/about', component: AboutView },
   { path: "/:pathMatch(.*)*", name: "NotFound", component: NotFound },
 ]

@@ -23,7 +23,14 @@ import {
   updateChapterSelection,
 } from '../services/book/book.service'
 import { generateSingleVoiceBuffer } from '../services/edge-tts.service'
-import { convertAudioBuffer, generateOmniVoiceBuffer, isVcEngine, listVcModels, listVcReferences } from '../services/vc.service'
+import {
+  convertAudioBuffer,
+  generateOmniVoiceBuffer,
+  isOmniDesignedVoice,
+  isVcEngine,
+  listVcModels,
+  listVcReferences,
+} from '../services/vc.service'
 import { buildPreviewCacheKey, readPreviewCache, writePreviewCache } from '../services/previewCache.service'
 
 // base64 膨胀 4/3，需低于全局 express.json 的 20mb 上限
@@ -363,7 +370,9 @@ export async function previewCharacterHandler(
     const vcOptions = isVcEngine(engine) && entry.vcRef ? { engine, ref: entry.vcRef } : undefined
     // omnivoice 引擎：绑定换声源时直接一步克隆合成（不经 Edge）；失败回落 Edge 基础音色
     const omniOptions = engine === 'omnivoice' && entry.vcRef ? { ref: entry.vcRef } : undefined
-    const usesCustomVoice = Boolean(vcOptions || omniOptions)
+    // 角色音色本身是设计的 Omni 音色（omni- 前缀）：合成为 wav
+    const omniVoiceWav = isOmniDesignedVoice(entry.voice)
+    const usesCustomVoice = Boolean(vcOptions || omniOptions || omniVoiceWav)
     const ext = usesCustomVoice ? 'wav' : 'mp3'
     // 试听缓存：同角色同参数（音色/换声源/文本）直接回放缓存文件，避免重复合成；
     // 任一参数变化会生成新缓存键自动失效（键的生成与文件读写都在 previewCache 服务内完成）

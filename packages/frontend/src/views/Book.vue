@@ -66,6 +66,15 @@
           {{ customVoices.length ? `已有 ${customVoices.length} 个` : '未上传' }}
         </el-tag>
         <span class="settings-toggle">{{ cloneOpen ? '收起 ▲' : '展开 ▼' }}</span>
+        <el-button
+          type="warning"
+          plain
+          size="small"
+          class="design-entry"
+          @click.stop="router.push('/voice-design')"
+        >
+          🎨 Omni 音色设计
+        </el-button>
       </div>
       <template v-if="cloneOpen">
         <p class="settings-tip">
@@ -875,6 +884,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadFile } from 'element-plus'
 import { getVoiceList, type Voice } from '@/api/tts'
@@ -897,9 +907,11 @@ import {
   previewPresetVoice,
   saveVoicePreset,
   getVcInfo,
+  listOmniDesigns,
   type CustomVoice,
   type VoicePreset,
   type VcInfo,
+  type OmniDesign,
 } from '@/api/voices'
 import { LoaderCircle, Search, Play, Pause, SkipBack, SkipForward, ArrowDown } from 'lucide-vue-next'
 import {
@@ -1001,11 +1013,22 @@ const vcRefOptions = computed(() => {
     : vcInfo.value.references
 })
 async function ensureVcInfo() {
-  if (vcInfo.value) return
+  if (!vcInfo.value) {
+    try {
+      vcInfo.value = await getVcInfo()
+    } catch {
+      vcInfo.value = { references: [], models: [] }
+    }
+  }
+  void loadOmniDesigns()
+}
+/** 设计的 Omni 音色（omnivoice 引擎角色表「音色」下拉用） */
+const omniDesigns = ref<OmniDesign[]>([])
+async function loadOmniDesigns() {
   try {
-    vcInfo.value = await getVcInfo()
+    omniDesigns.value = await listOmniDesigns()
   } catch {
-    vcInfo.value = { references: [], models: [] }
+    omniDesigns.value = []
   }
 }
 /** 当前书是否使用换声引擎（角色表显示「换声源」列；omnivoice 的换声源即参考音频） */
@@ -1375,6 +1398,7 @@ function getChapterAudio(): HTMLAudioElement {
 
 // 自定义音色（声音克隆）
 const customVoices = ref<CustomVoice[]>([])
+const router = useRouter()
 const cloneOpen = ref(false)
 
 // 自定义 Edge 音色预设
@@ -1651,6 +1675,17 @@ const voiceOptions = computed(() => {
     ContentCategories: [] as string[],
     VoicePersonalities: [] as string[],
   }))
+  // 设计的 Omni 音色：omnivoice 引擎下可选（音色名 omni- 前缀，后端按名路由克隆合成）
+  const designs = (isVcEngineBook.value && voiceEngine.value === 'omnivoice'
+    ? omniDesigns.value
+    : []
+  ).map((d) => ({
+    Name: d.ref,
+    cnName: `🎨 ${d.name}（Omni设计）`,
+    Gender: d.gender === 'male' ? 'Male' : d.gender === 'female' ? 'Female' : '',
+    ContentCategories: [] as string[],
+    VoicePersonalities: [] as string[],
+  }))
   const presets = voicePresets.value.map((p) => ({
     Name: p.id,
     cnName: `🎛️ ${p.name}`,
@@ -1658,7 +1693,7 @@ const voiceOptions = computed(() => {
     ContentCategories: [] as string[],
     VoicePersonalities: [] as string[],
   }))
-  return [...custom, ...presets, ...system]
+  return [...custom, ...designs, ...presets, ...system]
 })
 const hasCharacterVoices = computed(() => !!bookDetail.value?.characterVoices?.length)
 

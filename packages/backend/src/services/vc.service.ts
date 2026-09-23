@@ -38,7 +38,16 @@ const VC_TIMEOUT_MS = 120_000
 /** 在指定服务的基址上拼接固定路径（路径为代码内常量，不拼接用户输入） */
 function serviceUrl(
   engine: VcEngine | 'omnivoice',
-  fixedPath: '/references' | '/models' | '/convert' | '/generate' | '/health'
+  fixedPath:
+    | '/references'
+    | '/models'
+    | '/convert'
+    | '/generate'
+    | '/health'
+    | '/designs'
+    | '/designs/sample'
+    | '/designs/delete'
+    | '/design-preview'
 ): string {
   const base = engine === 'rvc' ? RVC_BASE : engine === 'omnivoice' ? OMNI_BASE : VC_BASE
   const url = new URL(base)
@@ -260,4 +269,95 @@ export async function generateOmniVoiceSegment(
   }
   logger.info(`OmniVoice synthesized: ${path.basename(opts.output)} (${opts.ref}, ${text.length} chars)`)
   return opts.output
+}
+
+// ===== OmniVoice 声音设计（Voice Design）：文字描述造声，保存时固化为参考音色 =====
+
+/** 设计音色的统一前缀：作为音色名参与全链路路由（同 custom- 之于 XTTS） */
+export const OMNI_VOICE_PREFIX = 'omni-'
+
+export function isOmniDesignedVoice(voice: string): boolean {
+  return typeof voice === 'string' && voice.startsWith(OMNI_VOICE_PREFIX)
+}
+
+export interface OmniDesign {
+  /** 设计名（用户可见） */
+  name: string
+  /** 参考音色名（omni-<name>，即 voices/ 中声纹 wav 的名字） */
+  ref: string
+  /** 声音描述（性别/年龄/音调等，逗号分隔，支持中文） */
+  instruct: string
+  /** 性别：female / male（供 AI 按角色性别分配） */
+  gender?: string
+  createdAt?: number
+}
+
+async function omniJson<T>(
+  fixedPath: '/designs' | '/designs/sample' | '/designs/delete',
+  body: unknown
+): Promise<T> {
+  const resp = await axios.post(serviceUrl('omnivoice', fixedPath), body, { timeout: 0 })
+  return resp.data as T
+}
+
+/** 已保存的设计音色列表 */
+export async function listOmniDesigns(): Promise<OmniDesign[]> {
+  try {
+    const resp = await fetch(serviceUrl('omnivoice', '/designs'), {
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const data = (await resp.json()) as { designs?: OmniDesign[] }
+    return data.designs || []
+  } catch (error) {
+    logger.warn(`List OmniVoice designs failed: ${(error as Error).message}`)
+    return []
+  }
+}
+
+/**
+ * 保存设计音色：用描述生成固定声纹样本（约 9 秒）并存为参考音频 omni-<name>.wav，
+ * 之后与普通参考音色一样按克隆合成，保证全书同一角色声音一致。同名保存=重摇声纹。
+ */
+export async function saveOmniDesign(payload: {
+  name: string
+  instruct: string
+  gender?: string
+}): Promise<OmniDesign> {
+  return enqueueOmniTask(async () => {
+    const data = await omniJson<{ design: OmniDesign }>('/designs', payload)
+    return data.design
+  })
+}
+
+export async function deleteOmniDesign(name: string): Promise<void> {
+  await omniJson<{ ok: boolean }>('/designs/delete', { name })
+}
+
+/** 按描述生成设计试听（不保存；同一描述每次为不同人声） */
+export async function previewOmniDesign(payload: {
+  instruct: string
+  text?: string
+}): Promise<Buffer> {
+  return enqueueOmniTask(async () => {
+    const resp = await axios.post(serviceUrl('omnivoice', '/design-preview'), payload, {
+      timeout: 0,
+      responseType: 'arraybuffer',
+      maxBodyLength: Infinity,
+    })
+    const wav = Buffer.from(resp.data)
+    if (!wav.length) throw new Error('omnivoice-server 返回空音频')
+    return wav
+  })
+}
+
+/** 取已保存设计的声纹样本（直接读文件，不推理） */
+export async function getOmniDesignSample(name: string): Promise<Buffer> {
+  const resp = await axios.post(serviceUrl('omnivoice', '/designs/sample'), { name }, {
+    timeout: 30_000,
+    responseType: 'arraybuffer',
+  })
+  const wav = Buffer.from(resp.data)
+  if (!wav.length) throw new Error('omnivoice-server 返回空音频')
+  return wav
 }

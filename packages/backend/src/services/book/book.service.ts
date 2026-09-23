@@ -18,6 +18,7 @@ import {
 import { extractSegmentArray } from '../../llm/segmentParser'
 import { listVoicePresets, saveVoicePreset } from '../voicePreset.service'
 import { listCustomVoices } from '../customVoice.service'
+import { listOmniDesigns } from '../vc.service'
 import type { ParsedChapter } from './chapter.service'
 
 export interface BookParams {
@@ -738,6 +739,21 @@ export async function planBookVoices(
             ContentCategories: ['自定义'],
             VoicePersonalities: [p.voice],
           }))
+          // omnivoice 引擎：设计的 Omni 音色进入候选池（普查阶段按性别轮转预分配）
+          if (engine === 'omnivoice') {
+            const designs = await listOmniDesigns()
+            candidateVoiceList.push(
+              ...designs.map((d) => ({
+                Name: d.ref,
+                Gender: d.gender === 'male' ? 'Male' : 'Female',
+                ContentCategories: ['Omni设计'],
+                VoicePersonalities: d.instruct
+                  .split(/[,，]/)
+                  .map((s) => s.trim())
+                  .filter(Boolean),
+              }))
+            )
+          }
         }
         // 用户还没有任何预设时，回落到标准 zh-CN 音色（不含方言变体），保证规划功能可用
         if (!candidateVoiceList.length) {
@@ -908,9 +924,54 @@ export async function planBookVoices(
         }
         // ===== 音色分配（两种可配置模式）=====
         // 克隆引擎：普查阶段已按性别轮转绑定克隆音色，两种分配模式都跳过
+        // omnivoice 引擎且有设计音色：LLM 按角色性格+性别从设计的 Omni 音色中挑选
+        const omniDesigns = engine === 'omnivoice' ? await listOmniDesigns() : []
         if (engine === 'clone') {
           await setDetail('声音克隆引擎：保留按性别轮转分配的克隆音色，可在角色表中调整')
           logger.info(`Clone engine: keep survey-assigned clone voices for book ${id}`)
+        } else if (omniDesigns.length) {
+          await setDetail('正在按角色性格分配设计的 Omni 音色…')
+          try {
+            const matchBook = await loadBook(id)
+            const matchRows = matchBook?.characterVoices || []
+            if (matchRows.length) {
+              const genderOfDesign = new Map(
+                omniDesigns.map((d) => [d.ref, d.gender || ''] as const)
+              )
+              const assignments = await assignVoicesByPersonality({
+                lang,
+                characters: matchRows.map((c) => ({
+                  character: c.character,
+                  gender: c.gender,
+                  description: c.description,
+                  dialog: c.dialog,
+                })),
+                // 名称附带声音描述标签，供 LLM 结合角色性格挑选
+                presets: omniDesigns.map((d) => ({
+                  id: d.ref,
+                  name: d.instruct ? `${d.name}（${d.instruct}）` : d.name,
+                  gender: d.gender,
+                })),
+              })
+              let applied = 0
+              await update((b) => {
+                for (const row of b.characterVoices || []) {
+                  const voice = assignments.get(row.character)
+                  if (!voice) continue
+                  // 性别一致性兜底：设计与角色性别冲突时不采用
+                  const dg = genderOfDesign.get(voice) || ''
+                  if (row.gender && dg && row.gender !== dg) continue
+                  row.voice = voice
+                  applied++
+                }
+              })
+              logger.info(
+                `OmniVoice designed voice assignment applied for book ${id}: ${applied}/${matchRows.length}`
+              )
+            }
+          } catch (e) {
+            logger.warn(`OmniVoice designed voice assignment skipped: ${(e as Error).message}`)
+          }
         } else if (assignMode === 'generate') {
           // 模式 B：AI 为每个角色生成专属音色——按对白数轮转分配 zh-CN 基础音色
           // （主要角色声线不重复），LLM 再按性格微调语速/音调/音量，以角色命名生成预设

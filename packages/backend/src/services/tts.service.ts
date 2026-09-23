@@ -13,7 +13,7 @@ import audioCacheInstance, { isCacheEntryUsable } from './audioCache.service'
 import { mergeSubtitleFiles, SubtitleFile, SubtitleFiles } from '../utils/subtitle'
 import taskManager, { Task } from '../utils/taskManager'
 import { handleSrt } from './tts.stream.service'
-import { convertAudioFile, generateOmniVoiceSegment, isVcEngine } from './vc.service'
+import { convertAudioFile, generateOmniVoiceSegment, isOmniDesignedVoice, isVcEngine } from './vc.service'
 
 // 错误消息枚举
 export enum ErrorMessages {
@@ -306,9 +306,13 @@ async function buildSegmentList(
       const vcOptions = isVcEngine(voiceEngine) && vcRef ? { engine: voiceEngine, ref: vcRef } : undefined
       const output = path.resolve(tmpDirPath, `${index + 1}_splits.mp3`)
       // omnivoice 引擎：绑定了换声源（参考音频）的片段改为一步克隆合成（文本+参考音频
-      // 直接生成，不经 Edge）；未绑定的片段（如旁白）仍走 Edge 预设音色
+      // 直接生成，不经 Edge）；角色音色本身是设计的 Omni 音色（omni- 前缀）时优先用它，
+      // 参考名即完整音色名；未绑定的片段（如旁白）仍走 Edge 预设音色
+      const omniVoice =
+        isOmniDesignedVoice(voice) && voiceEngine === 'omnivoice' ? voice : undefined
+      const omniRef = omniVoice || (voiceEngine === 'omnivoice' ? vcRef : undefined)
       const omniOptions =
-        voiceEngine === 'omnivoice' && vcRef ? { ref: vcRef, rate, output } : undefined
+        voiceEngine === 'omnivoice' && omniRef ? { ref: omniRef, rate, output } : undefined
       const activeEngine = vcOptions?.engine ?? (omniOptions ? 'omnivoice' : undefined)
       const activeRef = vcOptions?.ref ?? omniOptions?.ref
       const cacheKey = taskManager.generateTaskId({

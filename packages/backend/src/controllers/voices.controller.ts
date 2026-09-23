@@ -14,6 +14,127 @@ import {
 import { previewPresetVoice } from '../services/edge-tts.service'
 import { isCustomVoice, synthesizeCloneVoice } from '../services/clone-tts.service'
 import { listOmniReferences, listVcModels, listVcReferences } from '../services/vc.service'
+import {
+  deleteOmniDesign,
+  getOmniDesignSample,
+  listOmniDesigns,
+  previewOmniDesign,
+  saveOmniDesign,
+} from '../services/vc.service'
+import { z } from 'zod'
+
+/** 设计音色名与服务端保持同一校验：中文/字母/数字/短横线/下划线，长度 1~40 */
+const OMNI_DESIGN_NAME_RE = /^[\w\u4e00-\u9fff-]{1,40}$/
+
+/** 已保存的设计音色列表 */
+export async function listOmniDesignsHandler(_req: Request, res: Response) {
+  try {
+    const designs = await listOmniDesigns()
+    res.json({ success: true, code: 200, data: designs })
+  } catch (error) {
+    logger.warn(`listOmniDesigns failed: ${(error as Error).message}`)
+    res.status(500).json({ success: false, code: 500, message: (error as Error).message })
+  }
+}
+
+/** 保存设计音色：按描述生成声纹样本并固化为参考音频（CPU 较慢，等待完成） */
+export async function createOmniDesignHandler(req: Request, res: Response) {
+  try {
+    const parsed = z
+      .object({
+        name: z.string().trim().regex(OMNI_DESIGN_NAME_RE, '音色名称仅支持中文/字母/数字/短横线/下划线，长度 1~40'),
+        instruct: z.string().trim().min(1).max(200),
+        gender: z.enum(['female', 'male']).optional(),
+      })
+      .safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        code: 400,
+        message: parsed.error.issues[0]?.message || '参数格式错误',
+      })
+      return
+    }
+    const design = await saveOmniDesign(parsed.data)
+    res.json({ success: true, code: 200, message: '设计音色已保存', data: design })
+  } catch (error) {
+    logger.warn(`createOmniDesign failed: ${(error as Error).message}`)
+    res.status(500).json({ success: false, code: 500, message: (error as Error).message })
+  }
+}
+
+export async function deleteOmniDesignHandler(req: Request, res: Response) {
+  try {
+    const name = String(req.body?.name || '').trim()
+    if (!OMNI_DESIGN_NAME_RE.test(name)) {
+      res.status(400).json({ success: false, code: 400, message: '音色名称无效' })
+      return
+    }
+    await deleteOmniDesign(name)
+    res.json({ success: true, code: 200, message: '设计音色已删除' })
+  } catch (error) {
+    logger.warn(`deleteOmniDesign failed: ${(error as Error).message}`)
+    res.status(500).json({ success: false, code: 500, message: (error as Error).message })
+  }
+}
+
+/** 按描述试听设计音色（不保存；同一描述每次为不同人声，CPU 较慢） */
+export async function previewOmniDesignHandler(req: Request, res: Response) {
+  try {
+    const parsed = z
+      .object({
+        instruct: z.string().trim().min(1).max(200),
+        text: z.string().trim().max(300).optional(),
+      })
+      .safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        code: 400,
+        message: parsed.error.issues[0]?.message || '参数格式错误',
+      })
+      return
+    }
+    const buffer = await previewOmniDesign(parsed.data)
+    res.setHeader('Content-Type', 'audio/wav')
+    res.setHeader('Cache-Control', 'no-store')
+    res.setHeader('Content-Length', String(buffer.length))
+    const audioStream = new PassThrough()
+    audioStream.end(buffer)
+    audioStream.pipe(res)
+  } catch (error) {
+    logger.warn(`previewOmniDesign failed: ${(error as Error).message}`)
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, code: 500, message: (error as Error).message })
+    } else {
+      res.destroy(error as Error)
+    }
+  }
+}
+
+/** 取已保存设计的声纹样本（读文件不推理，试听保存后的固定声音） */
+export async function omniDesignSampleHandler(req: Request, res: Response) {
+  try {
+    const name = String(req.body?.name || '').trim()
+    if (!OMNI_DESIGN_NAME_RE.test(name)) {
+      res.status(400).json({ success: false, code: 400, message: '音色名称无效' })
+      return
+    }
+    const buffer = await getOmniDesignSample(name)
+    res.setHeader('Content-Type', 'audio/wav')
+    res.setHeader('Content-Length', String(buffer.length))
+    const audioStream = new PassThrough()
+    audioStream.end(buffer)
+    audioStream.pipe(res)
+  } catch (error) {
+    logger.warn(`omniDesignSample failed: ${(error as Error).message}`)
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, code: 500, message: (error as Error).message })
+    } else {
+      res.destroy(error as Error)
+    }
+  }
+}
 
 // base64 膨胀 4/3，需低于全局 express.json 的 20mb 上限
 const MAX_VOICE_BYTES = 14 * 1024 * 1024

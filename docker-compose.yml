@@ -181,7 +181,8 @@ services:
       # 参考音频自动转写模型（每个参考仅首次编码时运行一次；镜像内已预置 whisper-small）
       - OMNIVOICE_ASR_MODEL=openai/whisper-small
     volumes:
-      # 参考音色：与 vc-server 共用宿主机 voices/ 目录（换声源跨引擎通用）
-      - ./voices:/app/references:ro
+      # 参考音色：与 vc-server 共用宿主机 voices/ 目录（换声源跨引擎通用）。
+      # 需要写权限：音色设计页保存的 Omni 声纹样本也写入这里
+      - ./voices:/app/references
       # 参考音频编码结果缓存（含首次自动转写）：重建容器/换参考后不重跑 ASR
       - ./docker-data/omnivoice-prompts:/app/prompts

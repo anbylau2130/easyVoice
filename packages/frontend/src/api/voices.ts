@@ -143,3 +143,78 @@ export const getVcInfo = async (): Promise<VcInfo> => {
   }
   return response.data.data || { references: [], models: [] }
 }
+
+// ===== OmniVoice 音色设计（Voice Design）=====
+
+export interface OmniDesign {
+  /** 设计名（用户可见） */
+  name: string
+  /** 参考音色名（omni-<name>，即固化后的声纹） */
+  ref: string
+  /** 声音描述（性别/年龄/音调等，逗号分隔） */
+  instruct: string
+  /** 性别：female / male（供 AI 按角色性别分配） */
+  gender?: string
+  createdAt?: number
+}
+
+/** 已保存的设计音色列表 */
+export const listOmniDesigns = async (): Promise<OmniDesign[]> => {
+  const response = await api.get<{
+    success: boolean
+    code: number
+    message?: string
+    data: OmniDesign[]
+  }>('/omni-designs')
+  if (response.data?.code !== 200) {
+    throw new Error(response.data?.message || '获取设计音色失败')
+  }
+  return response.data.data || []
+}
+
+/** 保存设计音色：按描述生成声纹样本并固化（CPU 较慢，不设超时等待完成） */
+export const createOmniDesign = async (payload: {
+  name: string
+  instruct: string
+  gender?: string
+}): Promise<OmniDesign> => {
+  const response = await api.post<{
+    success: boolean
+    code: number
+    message?: string
+    data: OmniDesign
+  }>('/omni-designs', payload, { timeout: 0 })
+  if (response.data?.code !== 200) {
+    throw new Error(response.data?.message || '保存设计音色失败')
+  }
+  return response.data.data
+}
+
+export const deleteOmniDesign = async (name: string): Promise<void> => {
+  const response = await api.post<{ success: boolean; code: number; message?: string }>(
+    '/omni-designs/delete',
+    { name },
+    { timeout: 30000 }
+  )
+  if (response.data?.code !== 200) {
+    throw new Error(response.data?.message || '删除设计音色失败')
+  }
+}
+
+/** 按描述试听（不保存；同一描述每次为不同人声。CPU 较慢，不设超时） */
+export const previewOmniDesign = async (payload: { instruct: string; text?: string }): Promise<Blob> => {
+  const response = await api.post<Blob>('/omni-designs/preview', payload, {
+    responseType: 'blob',
+    timeout: 0,
+  })
+  return response.data
+}
+
+/** 试听已保存设计的声纹样本（读文件不推理） */
+export const fetchOmniDesignSample = async (name: string): Promise<Blob> => {
+  const response = await api.post<Blob>('/omni-designs/sample', { name }, {
+    responseType: 'blob',
+    timeout: 30000,
+  })
+  return response.data
+}

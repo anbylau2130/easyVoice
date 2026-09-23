@@ -14,14 +14,29 @@ OmniVoice 是 TTS（不能对已有音频换声），因此有换声源的角色
 
 参考音频的编码结果（VoiceClonePrompt，含 Whisper 自动转写）按参考名缓存为
 PROMPTS_DIR/<ref>.pt：每个参考只需跑一次 ASR，之后的合成直接复用。
+
+声音设计（Voice Design）：用文字描述（instruct）造声音，无需参考音频。
+注意：同一 instruct 每次生成的是"符合描述的不同人声"，直接用于有声书会导致
+角色声音漂移；因此设计结果以"声纹样本"固化——保存设计时用 instruct 生成一段
+固定试音文本，存为 voices/omni-<名字>.wav 参考音频，之后与普通参考音色一样走
+克隆合成，保证全书同一角色声音一致。
+  POST /design-preview    (json: instruct, text?)        按描述生成试听（不保存）
+  GET  /designs           列出已保存的设计
+  POST /designs           (json: name, instruct, gender?)  生成声纹并保存（同名=重摇声纹）
+  POST /designs/sample    (json: name)                    取已保存的声纹样本（不推理）
+  POST /designs/delete    (json: name)                    删除设计（声纹+缓存+登记）
+（name 走 body 而非路径参数：服务端 URL 保持固定路径，动态参数集中校验）
 """
 
 import io
+import json
 import os
+import re
 import threading
+import time
 from pathlib import Path
 
-from fastapi import FastAPI, Form
+from fastapi import Body, FastAPI, Form
 from fastapi.responses import JSONResponse, Response
 
 MODEL_ID = os.environ.get('OMNIVOICE_MODEL_ID', 'k2-fsa/OmniVoice')
@@ -34,6 +49,12 @@ NUM_STEP = int(os.environ.get('OMNIVOICE_NUM_STEP', '16'))
 ASR_MODEL = os.environ.get('OMNIVOICE_ASR_MODEL', 'openai/whisper-small')
 REFS_DIR = Path(os.environ.get('OMNI_REFS_DIR', '/app/references'))
 PROMPTS_DIR = Path(os.environ.get('OMNI_PROMPTS_DIR', '/app/prompts'))
+DESIGNS_PATH = PROMPTS_DIR / 'designs.json'
+
+# 声纹样本固定试音文本：约 30 字 ≈ 8~10 秒（官方建议参考音频 3~10 秒）
+VOICE_PRINT_TEXT = '大家好，这是一段声音样本。山不在高，有仙则名；水不在深，有龙则灵。'
+# 设计名：中文/字母/数字/短横线/下划线，长度 1~40
+DESIGN_NAME_RE = re.compile(r'^[\w\u4e00-\u9fff-]{1,40}$')
 
 app = FastAPI(title='EasyVoice OmniVoice Server', description='OmniVoice zero-shot voice cloning TTS')
 
@@ -167,3 +188,128 @@ def generate(
     buf = io.BytesIO()
     sf.write(buf, np.concatenate(chunks), 24000, format='WAV', subtype='PCM_16')
     return Response(content=buf.getvalue(), media_type='audio/wav')
+
+
+# ===== 声音设计（Voice Design）=====
+
+_designs_lock = threading.Lock()
+
+
+def load_designs() -> dict:
+    try:
+        return json.loads(DESIGNS_PATH.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def save_designs(designs: dict) -> None:
+    PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
+    DESIGNS_PATH.write_text(json.dumps(designs, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def generate_by_instruct(instruct: str, text: str) -> bytes:
+    """按描述生成音频（wav bytes）。同一描述每次生成的是不同人声，仅用于试听/固化声纹"""
+    import numpy as np
+    import soundfile as sf
+
+    model = get_model()
+    with _infer_lock:
+        audio = model.generate(text=text, instruct=instruct, num_step=NUM_STEP)
+    chunks = [np.asarray(chunk, dtype='float32') for chunk in audio if len(chunk)]
+    if not chunks:
+        raise RuntimeError('合成结果为空')
+    buf = io.BytesIO()
+    sf.write(buf, np.concatenate(chunks), 24000, format='WAV', subtype='PCM_16')
+    return buf.getvalue()
+
+
+def design_ref(name: str) -> str:
+    """设计名 → 参考音色名（voices/ 中 wav 文件名，不含扩展名）"""
+    return f'omni-{name}'
+
+
+@app.post('/design-preview')
+def design_preview(body: dict = Body(...)) -> Response:
+    instruct = str(body.get('instruct') or '').strip()
+    if not instruct:
+        return JSONResponse(status_code=400, content={'message': '缺少声音描述 instruct'})
+    text = str(body.get('text') or '').strip() or VOICE_PRINT_TEXT
+    if len(text) > 300:
+        text = text[:300]
+    try:
+        return Response(content=generate_by_instruct(instruct, text), media_type='audio/wav')
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={'message': f'声音设计合成失败：{exc}'})
+
+
+@app.get('/designs')
+def list_designs() -> dict:
+    with _designs_lock:
+        designs = load_designs()
+    items = [dict(d, name=name) for name, d in designs.items()]
+    items.sort(key=lambda d: d.get('createdAt') or 0, reverse=True)
+    return {'designs': items}
+
+
+@app.post('/designs')
+def create_design(body: dict = Body(...)) -> dict:
+    name = str(body.get('name') or '').strip()
+    instruct = str(body.get('instruct') or '').strip()
+    gender = str(body.get('gender') or '').strip().lower()
+    if not DESIGN_NAME_RE.match(name):
+        return JSONResponse(
+            status_code=400,
+            content={'message': '音色名称仅支持中文/字母/数字/短横线/下划线，长度 1~40'},
+        )
+    if not instruct:
+        return JSONResponse(status_code=400, content={'message': '缺少声音描述 instruct'})
+    try:
+        wav = generate_by_instruct(instruct, VOICE_PRINT_TEXT)
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={'message': f'声纹生成失败：{exc}'})
+    ref = design_ref(name)
+    REFS_DIR.mkdir(parents=True, exist_ok=True)
+    (REFS_DIR / f'{ref}.wav').write_bytes(wav)
+    with _designs_lock:
+        designs = load_designs()
+        designs[name] = {
+            'ref': ref,
+            'instruct': instruct,
+            'gender': gender if gender in ('female', 'male') else '',
+            'createdAt': int(time.time()),
+        }
+        save_designs(designs)
+    print(f'[omnivoice-server] design saved: {ref} ({instruct})', flush=True)
+    return {'design': dict(designs[name], name=name)}
+
+
+@app.post('/designs/sample')
+def design_sample(body: dict = Body(...)) -> Response:
+    name = str(body.get('name') or '').strip()
+    if not DESIGN_NAME_RE.match(name):
+        return JSONResponse(status_code=400, content={'message': '音色名称无效'})
+    path = REFS_DIR / f'{design_ref(name)}.wav'
+    if not path.is_file():
+        return JSONResponse(status_code=404, content={'message': f'设计音色不存在：{name}'})
+    return Response(content=path.read_bytes(), media_type='audio/wav')
+
+
+@app.post('/designs/delete')
+def delete_design(body: dict = Body(...)) -> dict:
+    name = str(body.get('name') or '').strip()
+    if not DESIGN_NAME_RE.match(name):
+        return JSONResponse(status_code=400, content={'message': '音色名称无效'})
+    ref = design_ref(name)
+    removed = False
+    with _designs_lock:
+        designs = load_designs()
+        if name in designs:
+            designs.pop(name)
+            save_designs(designs)
+            removed = True
+    (REFS_DIR / f'{ref}.wav').unlink(missing_ok=True)
+    (PROMPTS_DIR / f'{ref}.pt').unlink(missing_ok=True)
+    _prompt_cache.pop(ref, None)
+    if not removed:
+        return JSONResponse(status_code=404, content={'message': f'设计音色不存在：{name}'})
+    return {'ok': True}
