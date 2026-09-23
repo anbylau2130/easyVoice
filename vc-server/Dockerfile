@@ -2,9 +2,9 @@
 # 依赖：python3.10 + CPU torch + OpenVoice（仅 ToneColorConverter，裁剪掉 MeloTTS/whisper 重依赖）
 FROM python:3.10-slim
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends git ffmpeg libsndfile1 libgomp1 unzip curl ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+# apt 源：清华镜像优先（国内网络直连 Debian 官方源常超时），失败自动回退官方源
+RUN { sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g; s|security.debian.org|mirrors.tuna.tsinghua.edu.cn|g'       /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null; apt-get update; }  && apt-get install -y --no-install-recommends git ffmpeg libsndfile1 libgomp1 unzip curl ca-certificates  && rm -rf /var/lib/apt/lists/*  || { sed -i 's|mirrors.tuna.tsinghua.edu.cn|deb.debian.org|g'       /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null;       apt-get update && apt-get install -y --no-install-recommends git ffmpeg libsndfile1 libgomp1 unzip curl ca-certificates && rm -rf /var/lib/apt/lists/*; }
+
 
 WORKDIR /app
 
@@ -13,7 +13,9 @@ RUN pip install --no-cache-dir torch==2.2.2 --index-url https://download.pytorch
  || pip install --no-cache-dir torch==2.2.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 依赖安装：清华源优先（国内网络），失败回落官方 PyPI
+RUN (pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
+ || pip install --no-cache-dir -r requirements.txt)
 
 # OpenVoice 包已 vendor 进镜像（源：github.com/myshell-ai/OpenVoice，MIT 协议）。
 # __init__.py 置空避免拉起 MeloTTS/se_extractor 等重依赖——换声只需 ToneColorConverter

@@ -4,9 +4,9 @@
 # CPU 可跑但较慢（约 0.8B 扩散模型），推荐 GPU 机器启用。
 FROM python:3.10-slim
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg libsndfile1 libgomp1 curl ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+# apt 源：清华镜像优先（国内网络直连 Debian 官方源常超时），失败自动回退官方源
+RUN { sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g; s|security.debian.org|mirrors.tuna.tsinghua.edu.cn|g'       /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null; apt-get update; }  && apt-get install -y --no-install-recommends ffmpeg libsndfile1 libgomp1 curl ca-certificates  && rm -rf /var/lib/apt/lists/*  || { sed -i 's|mirrors.tuna.tsinghua.edu.cn|deb.debian.org|g'       /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null;       apt-get update && apt-get install -y --no-install-recommends ffmpeg libsndfile1 libgomp1 curl ca-certificates && rm -rf /var/lib/apt/lists/*; }
+
 
 WORKDIR /app
 
@@ -20,7 +20,9 @@ RUN pip install --no-cache-dir --retries 10 --timeout 60 \
       torch==2.8.0 torchaudio==2.8.0 -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 依赖安装：清华源优先（国内网络），失败回落官方 PyPI
+RUN (pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
+ || pip install --no-cache-dir -r requirements.txt)
 
 # 模型预置（本层在 COPY app.py 之前，改动 app.py 不触发模型重下）：
 # 主模型 k2-fsa/OmniVoice + 参考音频自动转写用的 whisper-small（只取推理必需文件）。

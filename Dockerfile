@@ -17,7 +17,11 @@ RUN corepack enable && \
 
 FROM node:20-alpine
 
-RUN apk add --no-cache ffmpeg
+# apk 源：清华镜像优先（国内网络直连官方 CDN 常超时），失败自动回退官方源
+RUN { sed -i 's|dl-cdn.alpinelinux.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apk/repositories; \
+      apk add --no-cache ffmpeg; } \
+ || { sed -i 's|mirrors.tuna.tsinghua.edu.cn|dl-cdn.alpinelinux.org|g' /etc/apk/repositories; \
+      apk add --no-cache ffmpeg; }
 
 WORKDIR /app
 

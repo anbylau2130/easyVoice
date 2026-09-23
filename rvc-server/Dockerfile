@@ -4,9 +4,9 @@
 # 模型放置：宿主机 rvc-models/<模型名>/xx.pth（+ 可选 xx.index），社区模型或自训均可
 FROM python:3.10-slim
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg libsndfile1 libgomp1 curl ca-certificates g++ make \
- && rm -rf /var/lib/apt/lists/*
+# apt 源：清华镜像优先（国内网络直连 Debian 官方源常超时），失败自动回退官方源
+RUN { sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g; s|security.debian.org|mirrors.tuna.tsinghua.edu.cn|g'       /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null; apt-get update; }  && apt-get install -y --no-install-recommends ffmpeg libsndfile1 libgomp1 curl ca-certificates g++ make  && rm -rf /var/lib/apt/lists/*  || { sed -i 's|mirrors.tuna.tsinghua.edu.cn|deb.debian.org|g'       /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null;       apt-get update && apt-get install -y --no-install-recommends ffmpeg libsndfile1 libgomp1 curl ca-certificates g++ make && rm -rf /var/lib/apt/lists/*; }
+
 
 WORKDIR /app
 
@@ -15,9 +15,12 @@ RUN pip install --no-cache-dir torch==2.2.2 --index-url https://download.pytorch
  || pip install --no-cache-dir torch==2.2.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 COPY requirements.txt .
-# fairseq==0.12.2 的依赖 omegaconf==2.0.6 元数据含老式 '>=5.1.*' 说明符，pip>=24.1 拒装，先降级
-RUN pip install --no-cache-dir "pip<24.1" \
- && pip install --no-cache-dir -r requirements.txt
+# fairseq==0.12.2 的依赖 omegaconf==2.0.6 元数据含老式 '>=5.1.*' 说明符，pip>=24.1 拒装，先降级；
+# 依赖安装清华源优先（国内网络），失败回落官方 PyPI
+RUN (pip install --no-cache-dir "pip<24.1" -i https://pypi.tuna.tsinghua.edu.cn/simple \
+ || pip install --no-cache-dir "pip<24.1") \
+ && (pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
+ || pip install --no-cache-dir -r requirements.txt)
 
 # RVC 基础模型：rvc-python 初始化时从硬编码的 huggingface.co 下载（内网不可达且不认 HF_ENDPOINT）。
 # 构建期从 hf-mirror 预置到其期望位置 site-packages/rvc_python/base_model/，运行时自动跳过下载。
