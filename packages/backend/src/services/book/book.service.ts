@@ -26,8 +26,11 @@ export interface BookParams {
   pitch: string
   volume: string
   useLLM: boolean
-  /** 配音引擎：edge=纯 Edge 预设 / clone=XTTS 声音克隆 / openvoice=Edge+OpenVoice 换声 / rvc=Edge+RVC 换声 */
-  voiceEngine?: 'edge' | 'clone' | 'openvoice' | 'rvc'
+  /**
+   * 配音引擎：edge=纯 Edge 预设 / clone=XTTS 声音克隆 / openvoice=Edge+OpenVoice 换声 /
+   * rvc=Edge+RVC 换声 / omnivoice=OmniVoice 一步克隆（有换声源的角色直接合成）
+   */
+  voiceEngine?: 'edge' | 'clone' | 'openvoice' | 'rvc' | 'omnivoice'
 }
 
 export type ChapterStatus = 'pending' | 'processing' | 'done' | 'failed' | 'skipped'
@@ -710,7 +713,8 @@ export async function planBookVoices(
         const { lang, voiceList } = await getLangConfig(langProbe)
         // 候选音色池按配音引擎区分：
         //  - clone：XTTS 克隆音色（custom-*），直接用参考声音合成
-        //  - 其余（edge/openvoice/rvc）：用户配置的 Edge 预设（openvoice/rvc 在合成后叠加换声）
+        //  - 其余（edge/openvoice/rvc/omnivoice）：用户配置的 Edge 预设
+        //   （openvoice/rvc 在合成后叠加换声；omnivoice 对绑定了换声源的角色直接克隆合成）
         const engine = book.params.voiceEngine || 'edge'
         let candidateVoiceList: { Name: string; Gender: string; ContentCategories: string[]; VoicePersonalities: string[] }[]
         if (engine === 'clone') {

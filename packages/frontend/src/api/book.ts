@@ -102,7 +102,7 @@ export interface BookSummary {
   updatedAt: string
 }
 
-export type VoiceEngine = 'edge' | 'clone' | 'openvoice' | 'rvc'
+export type VoiceEngine = 'edge' | 'clone' | 'openvoice' | 'rvc' | 'omnivoice'
 
 export interface BookParamsPayload {
   voice: string
@@ -110,7 +110,10 @@ export interface BookParamsPayload {
   pitch: string
   volume: string
   useLLM: boolean
-  /** 配音引擎：edge=纯 Edge 预设 / clone=XTTS 声音克隆 / openvoice=Edge+OpenVoice 换声 / rvc=Edge+RVC 换声 */
+  /**
+   * 配音引擎：edge=纯 Edge 预设 / clone=XTTS 声音克隆 / openvoice=Edge+OpenVoice 换声 /
+   * rvc=Edge+RVC 换声 / omnivoice=OmniVoice 一步克隆（有换声源的角色直接合成）
+   */
   voiceEngine?: VoiceEngine
 }
 

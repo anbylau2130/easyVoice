@@ -1,0 +1,9 @@
+# OmniVoice：k2-fsa 零样本声音克隆 TTS（Apache-2.0）
+# torch/torchaudio>=2.4 由 Dockerfile 先以 CPU 轮子装好，这里不再重复指定
+omnivoice==0.2.1
+# HTTP 服务
+fastapi
+uvicorn
+python-multipart
+# 音频写出（omnivoice 依赖里已有，显式声明保证可用）
+soundfile

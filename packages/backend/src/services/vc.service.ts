@@ -1,17 +1,20 @@
 import fs from 'fs/promises'
 import path from 'node:path'
+import axios from 'axios'
 import ffmpeg from '../utils/ffmpeg'
 import { logger } from '../utils/logger'
 
 /**
  * 音色转换（Voice Conversion）客户端：调用独立转换服务完成频谱级换声。
  * 管线：edge-tts 合成基础音频 → 本服务调用转换服务 → 得到目标音色音频。
- * 两种引擎各自独立部署：
+ * 各引擎独立部署，互不影响：
  *  - openvoice → vc-server（OpenVoice2 零样本换声，ref 为参考音频名，相似度中等，启动即用）
  *  - rvc → rvc-server（RVC v2 模型换声，ref 为已训练模型名，相似度更高、CPU 推理更快）
+ * 另有 omnivoice → omnivoice-server：非转换路线，而是「文本+参考音频」一步克隆合成
+ *（零样本 TTS，不能对已有音频换声），见下方 generateOmniVoice 系列函数。
  */
 
-// 两个转换服务的地址均为服务端配置的内网地址（docker 网络/本机回环），
+// 各合成/转换服务的地址均为服务端配置的内网地址（docker 网络/本机回环），
 // 仅运维可通过环境变量修改，非用户输入。显式校验协议防止误配置。
 function resolveServiceBase(raw: string, name: string): URL {
   const url = new URL(raw)
@@ -26,11 +29,18 @@ function resolveServiceBase(raw: string, name: string): URL {
 
 const VC_BASE = resolveServiceBase(process.env.VC_SERVER_URL || 'http://127.0.0.1:9090', 'VC_SERVER_URL')
 const RVC_BASE = resolveServiceBase(process.env.RVC_SERVER_URL || 'http://127.0.0.1:9091', 'RVC_SERVER_URL')
+const OMNI_BASE = resolveServiceBase(
+  process.env.OMNIVOICE_SERVER_URL || 'http://127.0.0.1:9092',
+  'OMNIVOICE_SERVER_URL'
+)
 const VC_TIMEOUT_MS = 120_000
 
 /** 在指定服务的基址上拼接固定路径（路径为代码内常量，不拼接用户输入） */
-function serviceUrl(engine: VcEngine, fixedPath: '/references' | '/models' | '/convert' | '/health'): string {
-  const base = engine === 'rvc' ? RVC_BASE : VC_BASE
+function serviceUrl(
+  engine: VcEngine | 'omnivoice',
+  fixedPath: '/references' | '/models' | '/convert' | '/generate' | '/health'
+): string {
+  const base = engine === 'rvc' ? RVC_BASE : engine === 'omnivoice' ? OMNI_BASE : VC_BASE
   const url = new URL(base)
   url.pathname = `${url.pathname.replace(/\/$/, '')}${fixedPath}`
   return url.toString()
@@ -169,4 +179,85 @@ export async function convertAudioBuffer(input: Buffer, opts: VcConvertOptions):
   const wav = Buffer.from(await resp.arrayBuffer())
   if (!wav.length) throw new Error('vc-server 返回空音频')
   return wav
+}
+
+// ===== OmniVoice（omnivoice 引擎）：文本+参考音频一步克隆合成 =====
+
+export interface OmniGenerateOptions {
+  /** 参考音色名（voices/ 中 wav 文件名不含扩展名，与 OpenVoice 换声源同一命名） */
+  ref: string
+  /** 语速（Edge 风格如 +10%），换算为 OmniVoice 的 speed 倍率 */
+  rate?: string
+}
+
+/** OmniVoice 参考音色列表（与 vc-server 共用 voices/ 目录、同一命名） */
+export async function listOmniReferences(): Promise<string[]> {
+  try {
+    const resp = await fetch(serviceUrl('omnivoice', '/references'), {
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const data = (await resp.json()) as { references?: string[] }
+    return data.references || []
+  } catch (error) {
+    logger.warn(`List OmniVoice references failed: ${(error as Error).message}`)
+    return []
+  }
+}
+
+function rateToSpeed(rate?: string): number {
+  const percent = Number((rate || '+0%').replace('%', ''))
+  if (!Number.isFinite(percent)) return 1.0
+  return Math.min(3, Math.max(0.5, Number((1 + percent / 100).toFixed(2))))
+}
+
+// 服务端推理为全局串行（锁内执行）：并发发送的请求会在服务端排队。
+// 用后端队列串行发送，保证排队时间不参与请求超时；同时不设请求超时——
+// CPU 合成单段可达数分钟、一章可达小时级，与「章节生成等待完成而非砍掉」
+// 的策略一致；服务不可达/宕机会立刻以连接错误失败，触发上层 Edge 回落
+let omniQueue: Promise<unknown> = Promise.resolve()
+function enqueueOmniTask<T>(task: () => Promise<T>): Promise<T> {
+  const run = omniQueue.then(task, task)
+  omniQueue = run.catch(() => {})
+  return run
+}
+
+/** OmniVoice 一步克隆合成：文本+参考音频 → wav Buffer（试听场景直接播放） */
+export async function generateOmniVoiceBuffer(text: string, opts: OmniGenerateOptions): Promise<Buffer> {
+  return enqueueOmniTask(async () => {
+    const form = new FormData()
+    form.append('text', text)
+    form.append('ref', opts.ref)
+    form.append('speed', String(rateToSpeed(opts.rate)))
+    // 用 axios 而非 fetch：undici fetch 有 300 秒响应头硬限制，慢于 5 分钟的
+    // CPU 合成会被无端砍断；axios（node:http）无此限制
+    const resp = await axios.post(serviceUrl('omnivoice', '/generate'), form, {
+      timeout: 0,
+      responseType: 'arraybuffer',
+      maxBodyLength: Infinity,
+    })
+    const wav = Buffer.from(resp.data)
+    if (!wav.length) throw new Error('omnivoice-server 返回空音频')
+    return wav
+  })
+}
+
+/**
+ * OmniVoice 一步克隆合成到文件：wav → 24kHz 单声道 mp3（章节片段输出路径与 Edge 片段一致）
+ * @returns 合成的 mp3 路径（即 opts.output）
+ */
+export async function generateOmniVoiceSegment(
+  text: string,
+  opts: OmniGenerateOptions & { output: string }
+): Promise<string> {
+  const wav = await generateOmniVoiceBuffer(text, opts)
+  const wavPath = opts.output.replace(/\.mp3$/i, '_omni.wav')
+  await fs.writeFile(wavPath, wav)
+  try {
+    await ffmpegToMp3(wavPath, opts.output)
+  } finally {
+    await fs.rm(wavPath, { force: true })
+  }
+  logger.info(`OmniVoice synthesized: ${path.basename(opts.output)} (${opts.ref}, ${text.length} chars)`)
+  return opts.output
 }

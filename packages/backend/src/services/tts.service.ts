@@ -13,7 +13,7 @@ import audioCacheInstance, { isCacheEntryUsable } from './audioCache.service'
 import { mergeSubtitleFiles, SubtitleFile, SubtitleFiles } from '../utils/subtitle'
 import taskManager, { Task } from '../utils/taskManager'
 import { handleSrt } from './tts.stream.service'
-import { convertAudioFile, isVcEngine } from './vc.service'
+import { convertAudioFile, generateOmniVoiceSegment, isVcEngine } from './vc.service'
 
 // 错误消息枚举
 export enum ErrorMessages {
@@ -36,7 +36,7 @@ export async function generateTTS(
   task?: Task,
   onProgress?: TtsProgressCallback,
   characterVoices?: CharacterVoice[],
-  /** 音色转换引擎：openvoice/rvc 时，角色绑定的换声源（vcRef）生效 */
+  /** 配音引擎：openvoice/rvc 换声 / omnivoice 一步克隆时，角色绑定的换声源（vcRef）生效 */
   voiceEngine?: string,
   /** 全文重新生成（强制全新合成）时忽略音频缓存 */
   ignoreCache?: boolean
@@ -305,14 +305,20 @@ async function buildSegmentList(
       const { text, pitch, voice, rate, volume, vcRef } = segment
       const vcOptions = isVcEngine(voiceEngine) && vcRef ? { engine: voiceEngine, ref: vcRef } : undefined
       const output = path.resolve(tmpDirPath, `${index + 1}_splits.mp3`)
+      // omnivoice 引擎：绑定了换声源（参考音频）的片段改为一步克隆合成（文本+参考音频
+      // 直接生成，不经 Edge）；未绑定的片段（如旁白）仍走 Edge 预设音色
+      const omniOptions =
+        voiceEngine === 'omnivoice' && vcRef ? { ref: vcRef, rate, output } : undefined
+      const activeEngine = vcOptions?.engine ?? (omniOptions ? 'omnivoice' : undefined)
+      const activeRef = vcOptions?.ref ?? omniOptions?.ref
       const cacheKey = taskManager.generateTaskId({
         text,
         pitch,
         voice,
         rate,
         volume,
-        vcEngine: vcOptions?.engine,
-        vcRef: vcOptions?.ref,
+        vcEngine: activeEngine,
+        vcRef: activeRef,
       })
       const cache = ignoreCache
         ? null
@@ -326,22 +332,39 @@ async function buildSegmentList(
         }
         return cache
       }
-      const result = await generateSingleVoice({
-        text,
-        pitch,
-        voice,
-        rate,
-        volume,
-        output,
-      })
-      logger.debug(`Cache miss and generate audio: ${result.audio}, ${result.srt}`)
-      // 音色转换：edge 合成的基础音频 → vc-server 频谱换声；失败时回落原声（不中断整章生成）
-      let audioFile = result.audio
-      if (vcOptions) {
+      let result: TTSResult
+      let audioFile: string
+      if (omniOptions) {
+        // 一步克隆合成；失败回落 Edge 基础音色，不中断整章生成
         try {
-          audioFile = await convertAudioFile(output, vcOptions)
+          const omniAudio = await generateOmniVoiceSegment(text, omniOptions)
+          result = { audio: omniAudio, srt: omniAudio.replace(/\.mp3$/, '.srt') }
+          audioFile = omniAudio
         } catch (err) {
-          logger.warn(`Voice conversion failed (${vcOptions.ref}), using base voice: ${(err as Error).message}`)
+          logger.warn(
+            `OmniVoice synthesis failed (${omniOptions.ref}), using base voice: ${(err as Error).message}`
+          )
+          result = await generateSingleVoice({ text, pitch, voice, rate, volume, output })
+          audioFile = result.audio
+        }
+      } else {
+        result = await generateSingleVoice({
+          text,
+          pitch,
+          voice,
+          rate,
+          volume,
+          output,
+        })
+        logger.debug(`Cache miss and generate audio: ${result.audio}, ${result.srt}`)
+        // 音色转换：edge 合成的基础音频 → vc-server 频谱换声；失败时回落原声（不中断整章生成）
+        audioFile = result.audio
+        if (vcOptions) {
+          try {
+            audioFile = await convertAudioFile(output, vcOptions)
+          } catch (err) {
+            logger.warn(`Voice conversion failed (${vcOptions.ref}), using base voice: ${(err as Error).message}`)
+          }
         }
       }
       audioByIndex.set(index, audioFile)

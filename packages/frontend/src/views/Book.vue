@@ -319,10 +319,11 @@
           </div>
           <div v-if="voiceMode === 'llm'" class="config-item">
             <label>配音引擎</label>
-            <el-select v-model="voiceEngine">
+            <el-select v-model="voiceEngine" @change="ensureVcInfo">
               <el-option label="Edge 预设（免费，推荐）" value="edge" />
               <el-option label="OpenVoice 换声（参考音色，需 vc 服务）" value="openvoice" />
               <el-option label="RVC 换声（需已训练模型，相似度最高）" value="rvc" />
+              <el-option label="OmniVoice 克隆（新一代零样本，需 omnivoice 服务，CPU 较慢）" value="omnivoice" />
               <el-option label="XTTS 声音克隆（直接用参考声音，较慢）" value="clone" />
             </el-select>
           </div>
@@ -729,6 +730,7 @@
                 clearable
                 filterable
                 :placeholder="vcRefOptions.length ? '选择换声源' : '无可换声源'"
+                @focus="ensureVcInfo"
                 @change="voicesDirty = true"
               >
                 <el-option v-for="name in vcRefOptions" :key="name" :label="name" :value="name" />
@@ -988,10 +990,10 @@ const savingLlm = ref(false)
 const planningLoading = ref(false)
 // 音色分配方式：match=按性格匹配已配置预设；generate=AI 为每个角色生成专属预设
 const voiceAssignMode = ref<'match' | 'generate'>('generate')
-// 配音引擎：edge=纯 Edge 预设 / clone=XTTS 克隆 / openvoice / rvc（创建时选定）
+// 配音引擎：edge=纯 Edge 预设 / clone=XTTS 克隆 / openvoice / rvc / omnivoice（创建时选定）
 const voiceEngine = ref<VoiceEngine>('edge')
 const vcInfo = ref<VcInfo | null>(null)
-/** 换声引擎（openvoice/rvc）下角色表的「换声源」下拉选项 */
+/** 换声引擎（openvoice/rvc/omnivoice）下角色表的「换声源」下拉选项 */
 const vcRefOptions = computed(() => {
   if (!vcInfo.value) return []
   return voiceEngine.value === 'rvc'
@@ -1006,13 +1008,16 @@ async function ensureVcInfo() {
     vcInfo.value = { references: [], models: [] }
   }
 }
-/** 当前书是否使用换声引擎（角色表显示「换声源」列） */
-const isVcEngineBook = computed(() => voiceEngine.value === 'openvoice' || voiceEngine.value === 'rvc')
+/** 当前书是否使用换声引擎（角色表显示「换声源」列；omnivoice 的换声源即参考音频） */
+const isVcEngineBook = computed(
+  () => voiceEngine.value === 'openvoice' || voiceEngine.value === 'rvc' || voiceEngine.value === 'omnivoice'
+)
 const engineLabels: Record<VoiceEngine, string> = {
   edge: 'Edge 预设',
   clone: 'XTTS 克隆',
   openvoice: 'OpenVoice 换声',
   rvc: 'RVC 换声',
+  omnivoice: 'OmniVoice 克隆',
 }
 const engineLabel = computed(() => engineLabels[voiceEngine.value] || 'Edge 预设')
 const stoppingPlan = ref(false)
@@ -2056,7 +2061,7 @@ async function openBook(id: string) {
     bookId.value = id
     // 同步该书的配音引擎；换声引擎需拉取换声源列表（参考音频 / RVC 模型）
     voiceEngine.value = bookDetail.value.params.voiceEngine || 'edge'
-    if (voiceEngine.value === 'openvoice' || voiceEngine.value === 'rvc') {
+    if (isVcEngineBook.value) {
       void ensureVcInfo()
     }
     // 记住最后打开的书：页面刷新后自动恢复到详情视图，规划/生成进度不丢

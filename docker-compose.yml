@@ -1,5 +1,5 @@
 # EasyVoice Docker Compose
-# 主服务一定部署；可选换声方案：OpenVoice（vc）/ RVC（rvc）/ XTTS 声音克隆（clone）
+# 主服务一定部署；可选配音方案：OpenVoice（vc）/ RVC（rvc）/ XTTS 声音克隆（clone）/ OmniVoice 克隆（omnivoice）
 #
 # 【方式零：一键部署（主服务 + OpenVoice + RVC，推荐新手）】
 #   Windows 双击 deploy.bat；Linux/macOS 执行 bash deploy.sh
@@ -10,17 +10,21 @@
 # 【方式一：仅主服务（仅 Edge 预设配音）】
 #   docker compose up -d --build
 #
-# 【方式二：只装一种换声方案】
-#   OpenVoice 版：docker compose --profile vc up -d --build
-#   RVC 版：      docker compose --profile rvc up -d --build
+# 【方式二：只装一种配音方案】
+#   OpenVoice 版：  docker compose --profile vc up -d --build
+#   RVC 版：        docker compose --profile rvc up -d --build
+#   OmniVoice 版：  docker compose --profile omnivoice up -d --build
+#     （模型已预置进镜像，首次构建约 20-40 分钟、镜像约 8GB（CPU/GPU 通用）；CPU 可跑但合成较慢，推荐 GPU 机器）
 #
-# 【方式三：换声服务单独部署在另一台机器】
-#   1. 换声机在仓库根目录单独构建运行（详见 README「方式 C」）：
-#      vc-server  -> -p 9090:9090，挂载 voices/ 为 /app/references:ro
-#      rvc-server -> -p 9091:9091，挂载 rvc-models/ 为 /app/models
+# 【方式三：换声/克隆服务单独部署在另一台机器】
+#   1. 服务机在仓库根目录单独构建运行（详见 README「方式 C」）：
+#      vc-server       -> -p 9090:9090，挂载 voices/ 为 /app/references:ro
+#      rvc-server      -> -p 9091:9091，挂载 rvc-models/ 为 /app/models
+#      omnivoice-server-> -p 9092:9092，挂载 voices/ 为 /app/references:ro
 #   2. 主服务所在机器的 .env 设置：
-#      VC_SERVER_URL=http://换声机IP:9090
-#      RVC_SERVER_URL=http://换声机IP:9091
+#      VC_SERVER_URL=http://服务机IP:9090
+#      RVC_SERVER_URL=http://服务机IP:9091
+#      OMNIVOICE_SERVER_URL=http://服务机IP:9092
 #   3. docker compose up -d --build
 #
 # 【可选加项：XTTS 声音克隆】
@@ -57,6 +61,8 @@ services:
       - VC_SERVER_URL=${VC_SERVER_URL:-http://vc-server:9090}
       # RVC 转换服务地址（rvc 换声引擎）：默认指向 compose 内的 rvc-server
       - RVC_SERVER_URL=${RVC_SERVER_URL:-http://rvc-server:9091}
+      # OmniVoice 克隆合成服务地址（omnivoice 引擎）：默认指向 compose 内的 omnivoice-server
+      - OMNIVOICE_SERVER_URL=${OMNIVOICE_SERVER_URL:-http://omnivoice-server:9092}
       # 克隆服务容器内看到的说话人目录（参考 wav 所在位置，随部署方式调整）
       - TTS_CLONE_SPEAKERS_DIR=${TTS_CLONE_SPEAKERS_DIR:-/app/speakers/custom-voices}
       # AI 配音规划用 LLM（也可在页面「AI 模型配置」卡片填写，优先级更高）
@@ -150,3 +156,32 @@ services:
       - ./rvc-models:/app/models
       # RVC hubert/rmvpe 基础模型缓存持久化（首次推理从 hf-mirror 下载）
       - ./docker-data/rvc-hf-cache:/root/.cache/huggingface
+
+  # OmniVoice 零样本声音克隆服务（可选）：加 --profile omnivoice 启用。
+  # 文本+参考音频一步合成（不能对已有音频换声）：绑定了换声源的角色直接克隆合成，
+  # 未绑定的角色（如旁白）仍走 Edge 预设音色。模型已预置进镜像，运行期零下载。
+  # 参考音色与 OpenVoice 共用宿主机 voices/ 目录（wav 文件名即换声源名）。
+  omnivoice-server:
+    build: ./omnivoice-server
+    container_name: omnivoice-server
+    restart: unless-stopped
+    profiles: ['omnivoice']
+    ports:
+      - '9092:9092'
+    # 约 0.8B 模型 fp32 常驻约 4GB（编码参考音频时另加载 Whisper）：限制内存防止拖垮 Docker 虚拟机
+    mem_limit: 6g
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
+    environment:
+      # auto = 有 CUDA 用 GPU，否则 CPU
+      - OMNIVOICE_DEVICE=auto
+      # 扩散解码步数：CPU 建议 16（约为 32 步速度的两倍，质量损失很小）
+      - OMNIVOICE_NUM_STEP=16
+      # 参考音频自动转写模型（每个参考仅首次编码时运行一次；镜像内已预置 whisper-small）
+      - OMNIVOICE_ASR_MODEL=openai/whisper-small
+    volumes:
+      # 参考音色：与 vc-server 共用宿主机 voices/ 目录（换声源跨引擎通用）
+      - ./voices:/app/references:ro
+      # 参考音频编码结果缓存（含首次自动转写）：重建容器/换参考后不重跑 ASR
+      - ./docker-data/omnivoice-prompts:/app/prompts

@@ -23,7 +23,7 @@ import {
   updateChapterSelection,
 } from '../services/book/book.service'
 import { generateSingleVoiceBuffer } from '../services/edge-tts.service'
-import { convertAudioBuffer, isVcEngine, listVcModels, listVcReferences } from '../services/vc.service'
+import { convertAudioBuffer, generateOmniVoiceBuffer, isVcEngine, listVcModels, listVcReferences } from '../services/vc.service'
 import { buildPreviewCacheKey, readPreviewCache, writePreviewCache } from '../services/previewCache.service'
 
 // base64 膨胀 4/3，需低于全局 express.json 的 20mb 上限
@@ -47,8 +47,11 @@ const bookParamsSchema = z.object({
   pitch: z.string().trim().default('+0Hz'),
   volume: z.string().trim().default('+0%'),
   useLLM: z.boolean().default(false),
-  /** 配音引擎：edge=纯 Edge 预设 / clone=XTTS 声音克隆 / openvoice=Edge+OpenVoice 换声 / rvc=Edge+RVC 换声 */
-  voiceEngine: z.enum(['edge', 'clone', 'openvoice', 'rvc']).default('edge'),
+  /**
+   * 配音引擎：edge=纯 Edge 预设 / clone=XTTS 声音克隆 / openvoice=Edge+OpenVoice 换声 /
+   * rvc=Edge+RVC 换声 / omnivoice=OmniVoice 一步克隆（有换声源的角色直接合成）
+   */
+  voiceEngine: z.enum(['edge', 'clone', 'openvoice', 'rvc', 'omnivoice']).default('edge'),
 })
 
 const createBookSchema = z.object({
@@ -297,7 +300,7 @@ export async function stopPlanVoicesHandler(req: Request, res: Response) {
 const characterVoiceEditSchema = z.object({
   character: z.string().trim().min(1),
   voice: z.string().trim().min(1),
-  /** 换声源：openvoice=参考音频名 / rvc=模型名；空串表示解绑 */
+  /** 换声源：openvoice/omnivoice=参考音频名 / rvc=模型名；空串表示解绑 */
   vcRef: z.string().trim().max(200).optional(),
 })
 
@@ -358,7 +361,10 @@ export async function previewCharacterHandler(
     const text = `我是${entry.character}。${description || '这是我配音试听。'}`
     const engine = book.params.voiceEngine
     const vcOptions = isVcEngine(engine) && entry.vcRef ? { engine, ref: entry.vcRef } : undefined
-    const ext = vcOptions ? 'wav' : 'mp3'
+    // omnivoice 引擎：绑定换声源时直接一步克隆合成（不经 Edge）；失败回落 Edge 基础音色
+    const omniOptions = engine === 'omnivoice' && entry.vcRef ? { ref: entry.vcRef } : undefined
+    const usesCustomVoice = Boolean(vcOptions || omniOptions)
+    const ext = usesCustomVoice ? 'wav' : 'mp3'
     // 试听缓存：同角色同参数（音色/换声源/文本）直接回放缓存文件，避免重复合成；
     // 任一参数变化会生成新缓存键自动失效（键的生成与文件读写都在 previewCache 服务内完成）
     const cacheKey = buildPreviewCacheKey({
@@ -372,14 +378,26 @@ export async function previewCharacterHandler(
     if (buffer) {
       logger.info(`Character preview cache hit: ${entry.character}`)
     } else {
-      // buffer 模式合成：短文本一次成形，风格被微软端拒绝时后端自动去风格重试
-      buffer = await generateSingleVoiceBuffer({
-        text,
-        voice: entry.voice,
-        rate: '+0%',
-        pitch: '+0Hz',
-        volume: '+0%',
-      })
+      // OmniVoice 一步克隆合成：文本+参考音频直接出声
+      if (omniOptions) {
+        try {
+          buffer = await generateOmniVoiceBuffer(text, omniOptions)
+        } catch (err) {
+          logger.warn(
+            `OmniVoice preview failed (${omniOptions.ref}), falling back to Edge: ${(err as Error).message}`
+          )
+        }
+      }
+      // Edge 基础音色合成：短文本一次成形，风格被微软端拒绝时后端自动去风格重试
+      if (!buffer) {
+        buffer = await generateSingleVoiceBuffer({
+          text,
+          voice: entry.voice,
+          rate: '+0%',
+          pitch: '+0Hz',
+          volume: '+0%',
+        })
+      }
       // 换声引擎：试听同样叠加音色转换，保证听到的就是最终效果
       if (vcOptions) {
         buffer = await convertAudioBuffer(buffer, vcOptions)
@@ -388,7 +406,7 @@ export async function previewCharacterHandler(
       logger.info(`Character preview synthesized and cached: ${entry.character}`)
     }
     // 下载模式：带附件头由浏览器保存（试听模式则前端直接播放，不落盘）
-    res.setHeader('Content-Type', vcOptions ? 'audio/wav' : 'audio/mpeg')
+    res.setHeader('Content-Type', usesCustomVoice ? 'audio/wav' : 'audio/mpeg')
     res.setHeader('Cache-Control', 'no-store')
     if (req.query.download) {
       const name = encodeURIComponent(`试听-${entry.character}`)

@@ -52,7 +52,7 @@
 
 ### 1. 通过 docker 运行
 
-主服务（Web 界面 + API）是一定要部署的，可选的是换声方案：**OpenVoice 换声**或 **RVC 换声**（二选一或都装）。
+主服务（Web 界面 + API）是一定要部署的，可选的是配音方案：**OpenVoice 换声**、**RVC 换声**、**OmniVoice 克隆**（选装一个或多个）。
 
 #### 方式 A：一键部署（主服务 + OpenVoice + RVC，推荐）
 
@@ -82,7 +82,7 @@ docker compose --profile vc --profile rvc up -d --build
 docker run -d -p 3000:3000 -v $(pwd)/audio:/app/audio cosincox/easyvoice:latest
 ```
 
-#### 方式 B：只装一种换声方案（OpenVoice 版 或 RVC 版）
+#### 方式 B：只装一种配音方案（OpenVoice 版 / RVC 版 / OmniVoice 版）
 
 ```bash
 # OpenVoice 版（主服务 + vc-server）
@@ -90,11 +90,16 @@ docker compose --profile vc up -d --build
 
 # RVC 版（主服务 + rvc-server）
 docker compose --profile rvc up -d --build
+
+# OmniVoice 版（主服务 + omnivoice-server，零样本克隆质量最高）
+docker compose --profile omnivoice up -d --build
 ```
 
-创建有声书时选择对应引擎（「OpenVoice 换声」或「RVC 换声」）即可使用。
+创建有声书时选择对应引擎（「OpenVoice 换声」/「RVC 换声」/「OmniVoice 克隆」）即可使用。
 
-#### 方式 C：换声服务单独部署在另一台机器
+> OmniVoice 说明：新一代零样本克隆 TTS（k2-fsa，Apache-2.0，600+ 语言）。文本 + 参考音频一步合成，克隆相似度高；绑定了换声源的角色直接克隆合成，未绑定的（如旁白）回落 Edge 预设音色。模型已预置进镜像（首次构建约 20-40 分钟、镜像约 8GB，含 CUDA 运行库 CPU/GPU 通用，运行期零下载）；**CPU 可跑但较慢**（约 0.8B 扩散模型，每句数秒到数十秒），推荐 GPU 机器启用。参考音色与 OpenVoice 共用 `voices/` 目录（换声源跨引擎通用）。
+
+#### 方式 C：换声/克隆服务单独部署在另一台机器
 
 主服务照常 `docker compose up -d --build` 部署，换声服务放到其他机器：
 
@@ -113,10 +118,18 @@ docker run -d -p 9091:9091 --restart unless-stopped \
   -v $(pwd)/rvc-models:/app/models \
   -v $(pwd)/docker-data/rvc-hf-cache:/root/.cache/huggingface \
   easyvoice-rvc-server
+
+# OmniVoice（在仓库根目录构建并运行；模型预置进镜像，首次构建约 15-30 分钟）
+docker build -t easyvoice-omnivoice-server ./omnivoice-server
+docker run -d -p 9092:9092 --restart unless-stopped --memory 6g \
+  -v $(pwd)/voices:/app/references:ro \
+  -v $(pwd)/docker-data/omnivoice-prompts:/app/prompts \
+  easyvoice-omnivoice-server
 ```
 
 - OpenVoice 参考音色：把 wav 放进 `voices/` 目录（文件名即换声源名），实时生效
 - RVC 音色模型：`rvc-models/<模型名>/<模型名>.pth`（+ 可选同名 `.index`），实时生效；来源见 `rvc-models/README.txt`
+- OmniVoice 参考音色：同样放 `voices/` 目录（与 OpenVoice 同名同文件，跨引擎通用）
 - Windows 手动运行容器时，`-v` 挂载请使用完整路径（如 `-v D:\easyVoice\rvc-models:/app/models`）
 
 ```bash
@@ -124,6 +137,7 @@ docker run -d -p 9091:9091 --restart unless-stopped \
 # 在 .env 中把换声服务指向实际地址：
 VC_SERVER_URL=http://换声机IP:9090
 RVC_SERVER_URL=http://换声机IP:9091
+OMNIVOICE_SERVER_URL=http://换声机IP:9092
 ```
 
 #### 可选：XTTS 声音克隆
@@ -282,7 +296,8 @@ pnpm dev
 | `TTS_CLONE_URL`    | `http://xtts-server:8020`     | XTTS 声音克隆服务地址          |
 | `VC_SERVER_URL`    | `http://vc-server:9090`       | OpenVoice 换声服务地址         |
 | `RVC_SERVER_URL`   | `http://rvc-server:9091`      | RVC 换声服务地址               |
-| `COMPOSE_PROFILES` | -                             | 一键启动的可选服务（clone,vc,rvc） |
+| `OMNIVOICE_SERVER_URL` | `http://omnivoice-server:9092` | OmniVoice 克隆合成服务地址 |
+| `COMPOSE_PROFILES` | -                             | 一键启动的可选服务（clone,vc,rvc,omnivoice） |
 
 - **配置文件**：可在 `.env` 或 `packages/backend/.env` 中设置，优先级为 `packages/backend/.env > .env`。  
 - **Docker 配置**：通过 `-e` 参数传入环境变量，如上文示例。
