@@ -24,8 +24,10 @@ packages/backend/e2e-tts-req.json
 /voices/
 packages/backend/_tmp.srt.json*
 xtts-api-server.tar
-# RVC 检索特征文件超大（数百 MB），超过 GitHub 100MB 单文件限制，不入库；
-# .pth 模型主体照常提交，index 可从模型来源处（HuggingFace 等）重新下载
+# RVC 模型文件巨大（51 个 .pth 共约 3GB，曾致仓库超 GitHub 体积上限无法 clone），
+# 一律不入库，仅保留本地文件；模型可从社区（HuggingFace 搜索 "rvc"）或自训练获得，
+# 来源与放置说明见 rvc-models/README.txt
 rvc-models/**/*.index
+rvc-models/**/*.pth
 # Docker 目录映射的持久化数据（生成的音频、模型权重等），不入库
 docker-data/
