@@ -53,15 +53,18 @@ export async function safeRunWithRetry<T>(
     retries?: number
     baseDelayMs?: number
     onError?: (err: unknown, attempt: number) => void
+    /** 返回 false 的错误不重试，立即抛出（如内容安全拦截：重试同样输入必然再失败） */
+    retryOn?: (err: unknown) => boolean
   } = {}
 ): Promise<T> {
-  const { retries = 3, baseDelayMs = 200, onError = defaultErrorHandler } = options
+  const { retries = 3, baseDelayMs = 200, onError = defaultErrorHandler, retryOn } = options
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
       return await fn()
     } catch (err) {
       onError(err, attempt + 1)
+      if (retryOn && !retryOn(err)) throw err
       if (attempt < retries - 1) {
         // 限速(429)需要远长于普通错误的等待：15s 起步线性递增、上限 45s，
         // 给服务端配额窗口恢复时间；其他错误维持原有短退避

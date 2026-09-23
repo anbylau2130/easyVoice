@@ -298,6 +298,12 @@ export async function fetchLlmSegments({
       baseDelayMs: 1000,
       onError: (err: unknown, attempt) =>
         logger.warn(`LLM segment attempt ${attempt} failed: ${(err as Error).message}`),
+      // 内容安全拦截（400 + "敏感/安全"提示）对相同输入必然复现，重试无意义，
+      // 立即抛给调用方做二分/旁白兜底
+      retryOn: (err) => {
+        const message = err instanceof Error ? err.message : String(err)
+        return !/敏感|不安全|status code 400/.test(message)
+      },
     }
   )
 }

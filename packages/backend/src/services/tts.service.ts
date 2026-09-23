@@ -107,9 +107,43 @@ async function generateWithLLM(
     const getProgress = () => {
       return Number(((count / textSegments.length) * 100).toFixed(2))
     }
+    // 单段 LLM 分段失败（内容安全拦截 400 / 超时）的兜底：
+    // 先二分缩小触发范围重试；仍失败的片段整段交给旁白朗读。
+    // 保证章节内容一字不少、不再整章失败
+    const narratorVoice =
+      characterVoices?.find((c) => c.character === '旁白')?.voice || voiceList[0]?.Name || ''
+    const segmentChunk = async (chunk: string): Promise<NormalizedSegment[]> => {
+      try {
+        return await fetchLlmSegments({ lang, voiceList, text: chunk, characterVoices })
+      } catch (err) {
+        const half = Math.floor(chunk.length / 2)
+        const period = chunk.lastIndexOf('。', half)
+        const mid = period > 0 ? period + 1 : half
+        if (chunk.length > 800 && mid > 0 && mid < chunk.length) {
+          logger.warn(
+            `LLM segmentation failed (${(err as Error).message.slice(0, 120)}), splitting ${chunk.length} chars at ${mid} and retrying halves`
+          )
+          const left = await segmentChunk(chunk.slice(0, mid))
+          const right = await segmentChunk(chunk.slice(mid))
+          return [...left, ...right]
+        }
+        logger.warn(
+          `LLM segmentation failed (${(err as Error).message.slice(0, 120)}), reading ${chunk.length} chars with narrator`
+        )
+        return [
+          {
+            text: chunk,
+            voice: narratorVoice,
+            rate: '+0%',
+            volume: '+0%',
+            pitch: '+0Hz',
+          },
+        ]
+      }
+    }
     for (let seg of textSegments) {
       count++
-      const llmSegments = await fetchLlmSegments({ lang, voiceList, text: seg, characterVoices })
+      const llmSegments = await segmentChunk(seg)
       const result = await buildSegmentList(
         // 前缀不能含冒号：该 id 会用作 Windows 临时目录名（冒号为保留字符）
         { ...segment, id: `segments-${count}-${segment.id}` },
