@@ -99,6 +99,25 @@ docker compose --profile omnivoice up -d --build
 
 > OmniVoice 说明：新一代零样本克隆 TTS（k2-fsa，Apache-2.0，600+ 语言）。文本 + 参考音频一步合成，克隆相似度高；绑定了换声源的角色直接克隆合成，未绑定的（如旁白）回落 Edge 预设音色。模型已预置进镜像（首次构建约 20-40 分钟、镜像约 8GB，含 CUDA 运行库 CPU/GPU 通用，运行期零下载）；**CPU 可跑但较慢**（约 0.8B 扩散模型，每句数秒到数十秒），推荐 GPU 机器启用。参考音色与 OpenVoice 共用 `voices/` 目录（换声源跨引擎通用）。
 
+**GPU 加速（OmniVoice，可选）**：有 NVIDIA 显卡（RTX 20 系及以后）的机器可让 OmniVoice 走 GPU，合成速度提升数十倍、质量参数可开满：
+
+1. 宿主机只装最新 NVIDIA 驱动（无需装 CUDA Toolkit）；Docker Desktop 使用 WSL2 后端，在 WSL 终端执行 `nvidia-smi` 能看到显卡
+2. 编辑 `.env`（可从 `.env.example` 复制）追加：
+   ```bash
+   TORCH_BUILD=cu126          # 构建 CUDA 版 torch（默认 cpu，直接用 GPU 不会生效）
+   OMNIVOICE_NUM_STEP=32      # GPU 性能充裕，解码步数开满质量更优
+   ```
+3. 构建并启动（注意叠加 GPU 覆盖文件）：
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile omnivoice up -d --build
+   ```
+4. 验证 GPU 可用（应输出 `True`）：
+   ```bash
+   docker run --rm --gpus all easyvoice-omnivoice-server python -c "import torch; print(torch.cuda.is_available())"
+   ```
+
+> CUDA 版 torch 体积较大（镜像约 12GB+，首次构建更久）。没有独显的机器不要叠加 `docker-compose.gpu.yml`（会因找不到 nvidia 驱动而启动失败），按常规方式部署即可。`TORCH_BUILD` 可选 `cu126`/`cu128`：驱动较新（≥ 560）选 cu128，其余选 cu126。
+
 **音色设计（Voice Design）**：启用 omnivoice 后访问「有声书」页 → 「🎨 Omni 音色设计」，用文字描述（性别/年龄段/音调/耳语/方言，支持中文）创造声音并随机试听；保存时生成固定声纹样本（`voices/omni-<名字>.wav`）保证全书声音一致。创建有声书选择 OmniVoice 引擎并规划角色时，AI 会依据角色性格与性别自动分配设计音色；角色表「音色」下拉也可手动选用（`omni-` 前缀音色在任何引擎下均可使用）。
 
 #### 方式 C：换声/克隆服务单独部署在另一台机器

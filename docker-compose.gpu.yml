@@ -1,0 +1,25 @@
+# GPU 加速覆盖文件（可选）：与主 compose 叠加使用，为 omnivoice-server 声明 NVIDIA GPU。
+#
+# 前置条件（Windows + Docker Desktop）：
+#   1. NVIDIA 显卡（RTX 20 系及以后均可）+ 最新 NVIDIA 驱动（只装驱动，无需装 CUDA Toolkit）
+#   2. Docker Desktop 使用 WSL2 后端；在 WSL 终端里 `nvidia-smi` 能看到显卡
+#
+# 用法（在 .env 中同时设置 TORCH_BUILD=cu126 触发 CUDA 版 torch 构建）：
+#   1. .env 追加：
+#      TORCH_BUILD=cu126
+#      OMNIVOICE_NUM_STEP=32
+#   2. 构建并启动（注意带 -f 覆盖文件）：
+#      docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile omnivoice up -d --build
+#   3. 验证 GPU 可用（应输出 True 和显卡名）：
+#      docker run --rm --gpus all easyvoice-omnivoice-server python -c "import torch; print(torch.cuda.is_available())"
+#
+# 没有显卡的机器不要叠加本文件（会因找不到 nvidia 驱动而启动失败），按 README 常规方式部署即可。
+services:
+  omnivoice-server:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

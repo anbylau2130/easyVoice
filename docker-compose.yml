@@ -162,7 +162,11 @@ services:
   # 未绑定的角色（如旁白）仍走 Edge 预设音色。模型已预置进镜像，运行期零下载。
   # 参考音色与 OpenVoice 共用宿主机 voices/ 目录（wav 文件名即换声源名）。
   omnivoice-server:
-    build: ./omnivoice-server
+    build:
+      context: ./omnivoice-server
+      args:
+        # GPU 加速：.env 设 TORCH_BUILD=cu126（默认 cpu）；配合 docker-compose.gpu.yml 使用
+        TORCH_BUILD: ${TORCH_BUILD:-cpu}
     container_name: omnivoice-server
     restart: unless-stopped
     profiles: ['omnivoice']
@@ -176,8 +180,9 @@ services:
     environment:
       # auto = 有 CUDA 用 GPU，否则 CPU
       - OMNIVOICE_DEVICE=auto
-      # 扩散解码步数：CPU 建议 16（约为 32 步速度的两倍，质量损失很小）
-      - OMNIVOICE_NUM_STEP=16
+      # 扩散解码步数：CPU 建议 16（约为 32 步速度的两倍，质量损失很小）；
+      # GPU 机器可在 .env 设 OMNIVOICE_NUM_STEP=32 提升质量
+      - OMNIVOICE_NUM_STEP=${OMNIVOICE_NUM_STEP:-16}
       # 参考音频自动转写模型（每个参考仅首次编码时运行一次；镜像内已预置 whisper-small）
       - OMNIVOICE_ASR_MODEL=openai/whisper-small
     volumes:

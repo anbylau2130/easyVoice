@@ -4,17 +4,22 @@
 # CPU 可跑但较慢（约 0.8B 扩散模型），推荐 GPU 机器启用。
 FROM python:3.10-slim
 
+# torch 构建变体：cpu（默认）/ cu126 / cu128。
+# GPU 加速：构建时 --build-arg TORCH_BUILD=cu126（compose 部署则在 .env 设 TORCH_BUILD=cu126），
+# 并配合 docker-compose.gpu.yml 声明 GPU；需 NVIDIA 显卡与就绪的驱动（详见 README）
+ARG TORCH_BUILD=cpu
+
 # apt 源：清华镜像优先（国内网络直连 Debian 官方源常超时），失败自动回退官方源
 RUN { sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g; s|security.debian.org|mirrors.tuna.tsinghua.edu.cn|g'       /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null; apt-get update; }  && apt-get install -y --no-install-recommends ffmpeg libsndfile1 libgomp1 curl ca-certificates  && rm -rf /var/lib/apt/lists/*  || { sed -i 's|mirrors.tuna.tsinghua.edu.cn|deb.debian.org|g'       /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null;       apt-get update && apt-get install -y --no-install-recommends ffmpeg libsndfile1 libgomp1 curl ca-certificates && rm -rf /var/lib/apt/lists/*; }
 
 
 WORKDIR /app
 
-# CPU 轮子优先（+cpu 本地版本号锁定，体积约 200MB，远小于 CUDA 捆绑包）；
-# 清华源仅作为 extra-index 提供构建依赖（如 flit_core），并兜底回落完整版
+# torch 轮子：cpu 体积小（约 200MB）；cu126/cu128 含 CUDA 运行库（数 GB，GPU 推理必需）。
+# 清华源仅作为 extra-index 提供构建依赖，并兜底回落完整版 torch
 RUN pip install --no-cache-dir --retries 10 --timeout 60 \
-      torch==2.8.0+cpu torchaudio==2.8.0 \
-      --index-url https://download.pytorch.org/whl/cpu \
+      torch==2.8.0+${TORCH_BUILD} torchaudio==2.8.0 \
+      --index-url https://download.pytorch.org/whl/${TORCH_BUILD} \
       --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple \
  || pip install --no-cache-dir --retries 10 --timeout 60 \
       torch==2.8.0 torchaudio==2.8.0 -i https://pypi.tuna.tsinghua.edu.cn/simple
