@@ -16,3 +16,7 @@ docs
 .mimosa
 .remember
 xtts-api-server.tar
+
+# 大体积本地目录：构建上下文不需要（各服务按 COPY 路径懒加载）
+/rvc-models
+/docker-data

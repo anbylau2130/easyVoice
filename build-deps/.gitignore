@@ -1,0 +1,3 @@
+# 本地预下载的构建依赖（运行 download-build-deps 脚本生成，体积大，不入库）
+*
+!.gitignore

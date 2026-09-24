@@ -34,3 +34,7 @@ docker-data/
 
 # OmniVoice 模型预下载缓存（约 2.3GB，运行 download-models 脚本生成，不入库）# RVC 训练中间产物（特征缓存等），不入库
 *.npy
+
+# 构建依赖预下载目录（torch 轮子/HF 基础模型等，运行 download-build-deps 脚本生成）
+build-deps/**
+!build-deps/.gitignore

@@ -1,6 +1,7 @@
 # OmniVoice 零样本声音克隆服务：文本 + 参考音频一步合成（新一代 TTS，Apache-2.0）
 # 与 vc-server（OpenVoice 换声）/ rvc-server（RVC 换声）相互独立、互不影响。
-# 主模型与 ASR 模型在构建期从 hf-mirror 预置进镜像，运行期零下载；
+# 模型不进镜像：运行期从挂载的 docker-data/omnivoice-models/hf 读取
+# （download-models 脚本预下载，或首次启动自动从 hf-mirror 下载）。
 # CPU 可跑但较慢（约 0.8B 扩散模型），推荐 GPU 机器启用。
 FROM python:3.10-slim
 
@@ -15,15 +16,21 @@ RUN { sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g; s|security.debian
 
 WORKDIR /app
 
-# torch 轮子：优先使用仓库内置的 CPU 轮子分片（wheels/，离线可用、不受网络波动影响；
-# 分片拼接后与官方轮子逐字节一致）。TORCH_BUILD 非 cpu（GPU 构建）或本地轮子缺失/安装
-# 失败时，走网络三级回退：pytorch 官方源 → 阿里云镜像 → 清华完整版
-COPY wheels/ ./wheels/
+# torch 轮子三级来源：
+#   cpu 构建 → 仓库内置 CPU 轮子分片（wheels/，离线可用，与官方逐字节一致）
+#   GPU 构建 → build-deps/torch/omni-<变体>/ 本地轮子（download-build-deps 脚本预下载）
+#   都不可用 → 网络回退链：pytorch 官方源 → 阿里云镜像 → 清华完整版
+COPY omnivoice-server/wheels/ ./wheels/
+COPY build-deps/ ./build-deps/
 RUN { [ "$TORCH_BUILD" = "cpu" ] \
       && cat wheels/torch-cpu.whl.part-* > wheels/torch-2.8.0+cpu-cp310-cp310-manylinux_2_28_x86_64.whl \
       && pip install --no-cache-dir --retries 10 --timeout 60 \
            "wheels/torch-2.8.0+cpu-cp310-cp310-manylinux_2_28_x86_64.whl" \
            "wheels/torchaudio-2.8.0+cpu-cp310-cp310-manylinux_2_28_x86_64.whl"; } \
+ || { [ "$TORCH_BUILD" != "cpu" ] \
+      && ls build-deps/torch/omni-${TORCH_BUILD}/*.whl >/dev/null 2>&1 \
+      && echo "[build] torch: using pre-downloaded local wheels" \
+      && pip install --no-cache-dir --retries 10 --timeout 60 build-deps/torch/omni-${TORCH_BUILD}/*.whl; } \
  || pip install --no-cache-dir --retries 10 --timeout 60 \
       torch==2.8.0+${TORCH_BUILD} torchaudio==2.8.0 \
       --index-url https://download.pytorch.org/whl/${TORCH_BUILD} \
@@ -34,9 +41,9 @@ RUN { [ "$TORCH_BUILD" = "cpu" ] \
       --index-url https://mirrors.aliyun.com/pypi/simple/ \
  || pip install --no-cache-dir --retries 10 --timeout 60 \
       torch==2.8.0 torchaudio==2.8.0 -i https://pypi.tuna.tsinghua.edu.cn/simple
-RUN rm -rf wheels
+RUN rm -rf wheels build-deps
 
-COPY requirements.txt .
+COPY omnivoice-server/requirements.txt .
 # 依赖安装：清华源优先（国内网络），失败回落官方 PyPI
 RUN (pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
  || pip install --no-cache-dir -r requirements.txt)
@@ -49,10 +56,10 @@ RUN (pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghu
 ENV HF_ENDPOINT=https://hf-mirror.com \
     HF_HUB_DISABLE_XET=1
 
-COPY entrypoint.sh /app/entrypoint.sh
+COPY omnivoice-server/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-COPY app.py .
+COPY omnivoice-server/app.py .
 
 ENV OMNIVOICE_MODEL_ID=k2-fsa/OmniVoice \
     OMNIVOICE_DEVICE=auto \

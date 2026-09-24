@@ -116,7 +116,16 @@ docker compose --profile omnivoice up -d --build
    docker run --rm --gpus all easyvoice-omnivoice-server python -c "import torch; print(torch.cuda.is_available())"
    ```
 
-**构建离线性（OmniVoice）**：仓库已内置 CPU 版 torch 轮子（`omnivoice-server/wheels/` 分片）与依赖镜像源回退，构建期网络依赖已降到最低。约 3GB 的模型不进镜像、不进仓库，运行期从 `docker-data/omnivoice-models/hf` 挂载读取：推荐先运行 `omnivoice-server/download-models.bat`（Linux/macOS 用 `.sh`）预下载（支持断点续传）；未预下载时容器首次启动会自动从 hf-mirror 下载。
+**构建离线性（全镜像）**：所有镜像构建前推荐先运行根目录的 **`download-build-deps.bat`**（Linux/macOS 用 `.sh`）预下载构建期大文件到 `build-deps/`（断点续传，已存在自动跳过）：
+
+| 预下载内容 | 体积 | 供哪个镜像使用 |
+| --- | --- | --- |
+| torch 2.2.2 CPU 轮子 | 约 190MB | rvc-server、vc-server |
+| RVC 基础模型 hubert/rmvpe/onnx | 约 700MB | rvc-server |
+| OpenVoice 转换器权重 | 约 110MB | vc-server |
+| torch 2.8.0 GPU 轮子（仅设 `TORCH_BUILD=cu126` 时） | 约 2GB | omnivoice-server（GPU） |
+
+Dockerfile 构建时**优先使用本地文件，网络仅兜底**（apt/pip 走清华镜像回退）。OmniVoice 的 CPU torch 轮子已直接内置在仓库中（`omnivoice-server/wheels/`），无需预下载；其模型运行期从 `docker-data/omnivoice-models/hf` 挂载（`omnivoice-server/download-models.bat` 预下载，或容器首次启动自动从 hf-mirror 下载）。`build-deps/` 不入库，每台构建机预下载一次。
 
 > CUDA 版 torch 体积较大（镜像约 12GB+，首次构建更久）。没有独显的机器不要叠加 `docker-compose.gpu.yml`（会因找不到 nvidia 驱动而启动失败），按常规方式部署即可。`TORCH_BUILD` 可选 `cu126`/`cu128`：驱动较新（≥ 560）选 cu128，其余选 cu126。
 

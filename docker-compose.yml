@@ -116,7 +116,9 @@ services:
   # 音色转换服务（可选）：加 --profile vc 启用。OpenVoice2 零样本换声，
   # 用 voices/ 里的参考音频对 Edge-TTS 合成结果做频谱重建（快，相似度中等）
   vc-server:
-    build: ./vc-server
+    build:
+      context: .
+      dockerfile: vc-server/Dockerfile
     container_name: vc-server
     restart: unless-stopped
     profiles: ['vc']
@@ -137,7 +139,9 @@ services:
   # 独立于 vc-server 部署（RVC 依赖链较老，隔离避免影响 OpenVoice 服务）。
   # 模型放置：宿主机 rvc-models/<模型名>/xx.pth（+ 可选 xx.index），社区模型或自训均可
   rvc-server:
-    build: ./rvc-server
+    build:
+      context: .
+      dockerfile: rvc-server/Dockerfile
     container_name: rvc-server
     restart: unless-stopped
     profiles: ['rvc']
@@ -163,7 +167,8 @@ services:
   # 参考音色与 OpenVoice 共用宿主机 voices/ 目录（wav 文件名即换声源名）。
   omnivoice-server:
     build:
-      context: ./omnivoice-server
+      context: .
+      dockerfile: omnivoice-server/Dockerfile
       args:
         # GPU 加速：.env 设 TORCH_BUILD=cu126（默认 cpu）；配合 docker-compose.gpu.yml 使用
         TORCH_BUILD: ${TORCH_BUILD:-cpu}
