@@ -233,11 +233,11 @@ export const previewOmniDesign = async (payload: { instruct: string; text?: stri
   return response.data
 }
 
-/** 试听已保存设计的声纹样本（读文件不推理） */
+/** 试听效果：按声纹现场合成一段试听语音（首次较慢，结果缓存后秒回） */
 export const fetchOmniDesignSample = async (name: string): Promise<Blob> => {
   const response = await api.post<Blob>('/omni-designs/sample', { name }, {
     responseType: 'blob',
-    timeout: 30000,
+    timeout: 0,
   })
   return response.data
 }

@@ -58,6 +58,16 @@
           <label>声音描述（可手动微调）</label>
           <el-input v-model="instruct" placeholder="如：女，青年，低音调" maxlength="200" />
         </div>
+        <div class="config-item instruct-line">
+          <label>试听文本（按这段文字生成声纹试听）</label>
+          <el-input
+            v-model="previewText"
+            type="textarea"
+            :rows="2"
+            maxlength="300"
+            placeholder="输入想听到的内容；留空则使用内置试音句"
+          />
+        </div>
       </template>
 
       <!-- 上传音频 -->
@@ -151,8 +161,14 @@
         </el-table-column>
         <el-table-column label="操作" width="320" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="playSample(row)">
-              ▶ 试听声纹
+            <el-button
+              link
+              type="primary"
+              size="small"
+              :disabled="sampleLoadingName === row.name"
+              @click="playSample(row)"
+            >
+              {{ sampleLoadingName === row.name ? '合成中…' : '▶ 试听效果' }}
             </el-button>
             <el-button link type="success" size="small" @click="handleEdit(row)">✏️ 编辑</el-button>
             <el-button
@@ -213,6 +229,7 @@ const generating = ref(false)
 const saving = ref(false)
 const loadingList = ref(false)
 const rerollingName = ref('')
+const sampleLoadingName = ref('')
 const designs = ref<OmniDesign[]>([])
 const previewUrl = ref('')
 const previewAudioRef = ref<HTMLAudioElement>()
@@ -356,11 +373,16 @@ function cancelEdit() {
 }
 
 async function playSample(row: OmniDesign) {
+  // 首次需按声纹现场合成试听语音（CPU 数分钟），结果缓存后秒回
+  sampleLoadingName.value = row.name
   try {
     const blob = await fetchOmniDesignSample(row.name)
     swapAudioBlob(blob)
+    ElMessage.success(`「${row.name}」试听已生成`)
   } catch (error) {
-    ElMessage.error((error as Error).message || '获取声纹样本失败')
+    ElMessage.error((error as Error).message || '试听生成失败')
+  } finally {
+    sampleLoadingName.value = ''
   }
 }
 

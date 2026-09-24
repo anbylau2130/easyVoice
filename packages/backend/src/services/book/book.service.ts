@@ -1248,6 +1248,8 @@ export async function saveCharacterVoices(
     ...(await allVoiceNames()),
     ...(await listCustomVoices()).map((v) => v.voice),
     ...(await listVoicePresets()).map((p) => p.id),
+    // 设计的 Omni 音色（omni-<名字>，即 voices/ 中的声纹参考名）
+    ...(await listOmniDesigns()).map((d) => d.ref),
   ])
   const existing = new Map((book.characterVoices || []).map((c) => [c.character, c] as const))
   const seen = new Set<string>()

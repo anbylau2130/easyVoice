@@ -377,10 +377,10 @@ export async function previewOmniDesign(payload: {
   })
 }
 
-/** 取已保存设计的声纹样本（直接读文件，不推理） */
+/** 试听效果：按声纹现场合成一段试听语音（首次较慢，结果由服务端缓存后秒回） */
 export async function getOmniDesignSample(name: string): Promise<Buffer> {
   const resp = await axios.post(serviceUrl('omnivoice', '/designs/sample'), { name }, {
-    timeout: 30_000,
+    timeout: 0,
     ...OMNI_AXIOS,
     responseType: 'arraybuffer',
   })

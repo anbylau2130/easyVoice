@@ -56,6 +56,9 @@ ASR_MODEL = os.environ.get('OMNIVOICE_ASR_MODEL', 'openai/whisper-small')
 REFS_DIR = Path(os.environ.get('OMNI_REFS_DIR', '/app/references'))
 PROMPTS_DIR = Path(os.environ.get('OMNI_PROMPTS_DIR', '/app/prompts'))
 DESIGNS_PATH = PROMPTS_DIR / 'designs.json'
+# 「试听效果」合成缓存：按声纹生成一段固定试听语音，重摇/重新保存/删除时失效
+SAMPLES_DIR = PROMPTS_DIR / 'samples'
+SAMPLE_TEXT = '你好，这是一段音色试听效果，用它来演绎你的故事再合适不过了。'
 
 # 声纹样本固定试音文本：约 30 字 ≈ 8~10 秒（官方建议参考音频 3~10 秒）
 VOICE_PRINT_TEXT = '大家好，这是一段声音样本。山不在高，有仙则名；水不在深，有龙则灵。'
@@ -313,6 +316,7 @@ def create_design(body: dict = Body(...)) -> dict:
             'createdAt': int(time.time()),
         }
         save_designs(designs)
+    invalidate_sample(ref)
     print(f'[omnivoice-server] design saved (instruct, {len(wav_bytes)}B): {ref} ({instruct})', flush=True)
     return {'design': dict(designs[name], name=name)}
 
@@ -353,8 +357,17 @@ async def upload_design(
             'createdAt': int(time.time()),
         }
         save_designs(designs)
+    invalidate_sample(ref)
     print(f'[omnivoice-server] design saved (uploaded, {ref_path.stat().st_size}B): {ref} ({instruct})', flush=True)
     return {'design': dict(designs[name], name=name)}
+
+
+def invalidate_sample(ref: str) -> None:
+    """声纹变更后失效对应的试听效果缓存"""
+    try:
+        (SAMPLES_DIR / f'{ref}.wav').unlink(missing_ok=True)
+    except Exception as exc:
+        print(f'[omnivoice-server] sample cache invalidation failed: {exc}', flush=True)
 
 
 def normalize_to_wav(data: bytes, out_path: Path) -> None:
@@ -374,13 +387,37 @@ def normalize_to_wav(data: bytes, out_path: Path) -> None:
 
 @app.post('/designs/sample')
 def design_sample(body: dict = Body(...)) -> Response:
+    """试听效果：用该音色合成一段固定试听语音（非回放上传的原始音频）。
+    首次合成较慢（CPU 数分钟），结果缓存为 samples/<ref>.wav，之后秒回；
+    重摇/重新保存/删除设计时缓存自动失效"""
     name = str(body.get('name') or '').strip()
     if not DESIGN_NAME_RE.match(name):
         return JSONResponse(status_code=400, content={'message': '音色名称无效'})
-    path = REFS_DIR / f'{design_ref(name)}.wav'
-    if not path.is_file():
+    ref = design_ref(name)
+    if not (REFS_DIR / f'{ref}.wav').is_file():
         return JSONResponse(status_code=404, content={'message': f'设计音色不存在：{name}'})
-    return Response(content=path.read_bytes(), media_type='audio/wav')
+    SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = SAMPLES_DIR / f'{ref}.wav'
+    if cache_path.is_file() and cache_path.stat().st_size > 1000:
+        return Response(content=cache_path.read_bytes(), media_type='audio/wav')
+    model = get_model()
+    prompt = get_prompt(model, ref)
+    if prompt is None:
+        return JSONResponse(status_code=404, content={'message': f'声纹编码失败：{name}'})
+    with _infer_lock:
+        audio = model.generate(text=SAMPLE_TEXT, voice_clone_prompt=prompt, num_step=NUM_STEP)
+    release_memory()
+    import numpy as np
+    import soundfile as sf
+
+    chunks = [np.asarray(chunk, dtype='float32') for chunk in audio if len(chunk)]
+    if not chunks:
+        return JSONResponse(status_code=500, content={'message': '合成结果为空'})
+    buf = io.BytesIO()
+    sf.write(buf, np.concatenate(chunks), 24000, format='WAV', subtype='PCM_16')
+    cache_path.write_bytes(buf.getvalue())
+    print(f'[omnivoice-server] sample synthesized & cached: {cache_path.name}', flush=True)
+    return Response(content=buf.getvalue(), media_type='audio/wav')
 
 
 @app.post('/designs/delete')
@@ -398,6 +435,7 @@ def delete_design(body: dict = Body(...)) -> dict:
             removed = True
     (REFS_DIR / f'{ref}.wav').unlink(missing_ok=True)
     (PROMPTS_DIR / f'{ref}.pt').unlink(missing_ok=True)
+    invalidate_sample(ref)
     _prompt_cache.pop(ref, None)
     if not removed:
         return JSONResponse(status_code=404, content={'message': f'设计音色不存在：{name}'})

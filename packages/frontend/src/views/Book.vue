@@ -1155,7 +1155,7 @@ async function downloadPreview(row: CharacterVoice) {
       if (!ok) return
     }
     const res = await fetch(characterPreviewUrl(bookId.value, row.character, true), {
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(600_000),
     })
     if (!res.ok) {
       let message = `下载失败（HTTP ${res.status}）`
@@ -1264,7 +1264,8 @@ async function previewPlayerLoad(index: number) {
       if (!ok) return
     }
     const res = await fetch(characterPreviewUrl(bookId.value, row.character), {
-      signal: AbortSignal.timeout(120_000),
+      // OmniVoice 设计音色首次试听需现场合成（CPU 数分钟），超时放宽到 10 分钟
+      signal: AbortSignal.timeout(600_000),
     })
     const contentType = res.headers.get('content-type') || ''
     if (!res.ok || !contentType.includes('audio')) {
