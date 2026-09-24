@@ -499,8 +499,12 @@
             :disabled="!!bookDetail.planning"
             style="margin-right: 16px"
           >
-            <el-radio value="match">按性格匹配已配置音色</el-radio>
-            <el-radio value="generate">AI 生成专属音色（每角色独立）</el-radio>
+            <el-radio value="match">
+              {{ voiceEngine === 'omnivoice' ? '从设计音色中按性格挑选' : '按性格匹配已配置音色' }}
+            </el-radio>
+            <el-radio value="generate">
+              {{ voiceEngine === 'omnivoice' ? 'AI 生成专属 Omni 音色（按性格+性别，每角色独立）' : 'AI 生成专属音色（每角色独立）' }}
+            </el-radio>
           </el-radio-group>
           <el-button
             v-if="!hasCharacterVoices"

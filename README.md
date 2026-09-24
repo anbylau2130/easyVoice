@@ -116,9 +116,15 @@ docker compose --profile omnivoice up -d --build
    docker run --rm --gpus all easyvoice-omnivoice-server python -c "import torch; print(torch.cuda.is_available())"
    ```
 
+**构建离线性（OmniVoice）**：仓库已内置 CPU 版 torch 轮子（`omnivoice-server/wheels/` 分片）与依赖镜像源回退，常见构建失败点已消除。2.3GB 的模型默认构建期从 hf-mirror 下载；推荐先运行 `omnivoice-server/download-models.bat`（Linux/macOS 用 `.sh`）预下载到本地（支持断点续传），之后构建完全离线。注意 `models/hf/` 不入库，每台构建机预下载一次即可。
+
 > CUDA 版 torch 体积较大（镜像约 12GB+，首次构建更久）。没有独显的机器不要叠加 `docker-compose.gpu.yml`（会因找不到 nvidia 驱动而启动失败），按常规方式部署即可。`TORCH_BUILD` 可选 `cu126`/`cu128`：驱动较新（≥ 560）选 cu128，其余选 cu126。
 
-**音色设计（Voice Design）**：启用 omnivoice 后访问「有声书」页 → 「🎨 Omni 音色设计」，用文字描述（性别/年龄段/音调/耳语/方言，支持中文）创造声音并随机试听；保存时生成固定声纹样本（`voices/omni-<名字>.wav`）保证全书声音一致。创建有声书选择 OmniVoice 引擎并规划角色时，AI 会依据角色性格与性别自动分配设计音色；角色表「音色」下拉也可手动选用（`omni-` 前缀音色在任何引擎下均可使用）。
+**音色设计（Voice Design）**：启用 omnivoice 后访问「有声书」页 → 「🎨 Omni 音色设计」，用文字描述（性别/年龄段/音调/耳语/方言，支持中文）创造声音并随机试听；保存时生成固定声纹样本（`voices/omni-<名字>.wav`）保证全书声音一致。创建有声书选择 OmniVoice 引擎后，规划阶段的音色分配分两种模式：
+- **AI 生成专属 Omni 音色**（默认）：通读全书后，AI 依据每个角色的性格与性别自动设计声音属性（性别/年龄段/音调），并逐角色固化声纹（`omni-<角色名>.wav`），实现"一书一群像、角色声音不重样"；CPU 上每个声纹需数分钟，GPU 秒级
+- **从设计音色中按性格挑选**：在音色设计页预先设计好的音色，由 AI 按角色性格与性别匹配分配
+
+角色表「音色」下拉也可手动选用（`omni-` 前缀音色在任何引擎下均可使用）。
 
 #### 方式 C：换声/克隆服务单独部署在另一台机器
 

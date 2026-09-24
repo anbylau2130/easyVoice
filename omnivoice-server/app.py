@@ -120,6 +120,8 @@ def get_prompt(model, name: str):
             prompt = model.create_voice_clone_prompt(ref_audio=str(ref_path))
         prompt.save(str(prompt_path))
         print(f'[omnivoice-server] prompt encoded & cached: {prompt_path.name}', flush=True)
+        # 编码完成即卸载 Whisper（下次编码新参考时自动重载），常态内存显著降低
+        release_memory(unload_asr=True)
     _prompt_cache[name] = prompt
     return prompt
 
@@ -132,6 +134,29 @@ def clamp_speed(value: float) -> float:
     if value <= 0:
         return 1.0
     return min(3.0, max(0.5, value))
+
+
+def release_memory(unload_asr: bool = False) -> None:
+    """推理后尽量归还内存：
+    - unload_asr=True 时卸载 Whisper 管线（约 1GB）。ASR 只在参考音频编码时需要，
+      缺失时 create_voice_clone_prompt 会自动重载（loading on-the-fly），卸载是安全的；
+    - gc + malloc_trim 归还 glibc 空闲页（torch 大量临时张量释放后 RSS 常驻不降）"""
+    import gc
+
+    if unload_asr and _model is not None:
+        try:
+            if getattr(_model, '_asr_pipe', None) is not None:
+                _model._asr_pipe = None
+                print('[omnivoice-server] idle ASR pipeline unloaded to free memory', flush=True)
+        except Exception as exc:
+            print(f'[omnivoice-server] ASR unload failed: {exc}', flush=True)
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL('libc.so.6').malloc_trim(0)
+    except Exception:
+        pass
 
 
 @app.get('/health')
@@ -178,6 +203,7 @@ def generate(
             speed=clamp_speed(speed),
             num_step=NUM_STEP,
         )
+    release_memory()
     # 返回 list[np.ndarray]（24kHz）：拼接为一条 16bit PCM wav
     import numpy as np
     import soundfile as sf
@@ -215,6 +241,7 @@ def generate_by_instruct(instruct: str, text: str) -> bytes:
     model = get_model()
     with _infer_lock:
         audio = model.generate(text=text, instruct=instruct, num_step=NUM_STEP)
+    release_memory()
     chunks = [np.asarray(chunk, dtype='float32') for chunk in audio if len(chunk)]
     if not chunks:
         raise RuntimeError('合成结果为空')

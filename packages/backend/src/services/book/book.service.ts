@@ -18,7 +18,7 @@ import {
 import { extractSegmentArray } from '../../llm/segmentParser'
 import { listVoicePresets, saveVoicePreset } from '../voicePreset.service'
 import { listCustomVoices } from '../customVoice.service'
-import { listOmniDesigns } from '../vc.service'
+import { listOmniDesigns, saveOmniDesign } from '../vc.service'
 import type { ParsedChapter } from './chapter.service'
 
 export interface BookParams {
@@ -924,11 +924,114 @@ export async function planBookVoices(
         }
         // ===== 音色分配（两种可配置模式）=====
         // 克隆引擎：普查阶段已按性别轮转绑定克隆音色，两种分配模式都跳过
-        // omnivoice 引擎且有设计音色：LLM 按角色性格+性别从设计的 Omni 音色中挑选
+        // omnivoice 引擎：生成模式=AI 依角色性格+性别设计专属 Omni 音色并固化声纹；
+        // 匹配模式=从已设计音色中按性格挑选
         const omniDesigns = engine === 'omnivoice' ? await listOmniDesigns() : []
         if (engine === 'clone') {
           await setDetail('声音克隆引擎：保留按性别轮转分配的克隆音色，可在角色表中调整')
           logger.info(`Clone engine: keep survey-assigned clone voices for book ${id}`)
+        } else if (engine === 'omnivoice' && assignMode === 'generate') {
+          // ===== OmniVoice 引擎（生成模式）：AI 依据角色性格+性别设计专属 Omni 音色 =====
+          // LLM 按官方声音属性词表（性别/年龄段/音调）为每个角色产出描述（instruct），
+          // 再逐角色生成并固化声纹（omni-<角色名>.wav，GPU 秒级、CPU 每角色数分钟）；
+          // 失败的角色保留普查阶段轮转分配的音色，不阻塞规划
+          await setDetail('正在依据角色性格设计专属 Omni 音色…')
+          const genBook = await loadBook(id)
+          // 只为有台词的角色生成（无对白者不会出声，省去声纹固化的等待）；
+          // 按对白数取前 30 个主要角色
+          const genRows = (genBook?.characterVoices || [])
+            .filter((r) => r.character !== '旁白' && (r.dialog || 0) > 0)
+            .sort((a, b) => (b.dialog || 0) - (a.dialog || 0))
+            .slice(0, 30)
+          if (genRows.length) {
+            const rowOf = new Map(genRows.map((r) => [r.character, r]))
+            const paramTable = genRows
+              .map(
+                (r) =>
+                  `${r.character}（${r.gender === 'male' ? '男' : '女'}，对白${r.dialog || 0} 句）：${r.description || '身份未知'}`
+              )
+              .join('\n')
+            const prompt = `以下是一部小说的角色列表。请依据每个角色的性别与性格，为每个角色设计一段声音属性描述，用于声音克隆 TTS 的音色定制。
+要求：
+1. 性别必须与角色性别一致（男性角色用"男"，女性角色用"女"，不要翻转）；
+2. 年龄段只能从这些取值中选择：儿童 / 少年 / 青年 / 中年 / 老年（须符合角色年龄设定）；
+3. 音调只能从这些取值中选择：极低音调 / 低音调 / 中音调 / 高音调 / 极高音调（贴合性格：威严沉稳偏低，活泼尖脆偏高）；
+4. 不同角色的属性组合尽量错开，增加辨识度；
+5. 逐个角色都要返回，不要遗漏。只输出 JSON：
+{"assignments":[{"character":"角色名","age":"老年","pitch":"低音调"}]}
+
+### 角色列表
+${paramTable}`
+            try {
+              const resp = await safeRunWithRetry(
+                async () => {
+                  return await openai.createChatCompletion({
+                    messages: [
+                      { role: 'system', content: 'You are a helpful assistant. And you can return valid json object' },
+                      { role: 'user', content: prompt },
+                    ],
+                    temperature: 0.3,
+                    max_tokens: 2000,
+                    ...openai.fastExtractFields(openai.getModel()),
+                    response_format: { type: 'json_object' },
+                  })
+                },
+                { retries: 2, baseDelayMs: 3000 }
+              )
+              const content = resp.choices[0]?.message?.content
+              if (!content) throw new Error('LLM returned empty content')
+              const parsed = parseJsonLoose(content)
+              const arr = extractSegmentArray(parsed)
+              const AGES = ['儿童', '少年', '青年', '中年', '老年']
+              const PITCHES = ['极低音调', '低音调', '中音调', '高音调', '极高音调']
+              let done = 0
+              for (const item of arr || []) {
+                const character = typeof item.character === 'string' ? item.character.trim() : ''
+                // 角色名精确匹配，未命中时双向包含匹配（LLM 可能返回"黛玉"等简称）
+                let row = rowOf.get(character)
+                if (!row && character.length >= 2) {
+                  for (const [key, r] of rowOf) {
+                    if (key.length >= 2 && (key.includes(character) || character.includes(key))) {
+                      row = r
+                      break
+                    }
+                  }
+                }
+                if (!row) continue
+                const age = AGES.includes(item.age as string) ? (item.age as string) : ''
+                const pitch = PITCHES.includes(item.pitch as string) ? (item.pitch as string) : ''
+                const genderZh = row.gender === 'male' ? '男' : '女'
+                const instruct = [genderZh, age, pitch].filter(Boolean).join('，')
+                // 设计名即角色名（声纹文件 omni-<名字>.wav）；替换文件系统不允许的字符
+                const designName = character.replace(/[^\w\u4e00-\u9fff-]+/g, '-').slice(0, 40)
+                if (!instruct || !designName || /^-+$/.test(designName)) continue
+                done++
+                await setDetail(`正在生成专属 Omni 音色（${done}/${genRows.length}）：${character}`)
+                try {
+                  const design = await saveOmniDesign({
+                    name: designName,
+                    instruct,
+                    gender: row.gender,
+                  })
+                  await update((b) => {
+                    for (const r2 of b.characterVoices || []) {
+                      if (r2.character === character) r2.voice = design.ref
+                    }
+                  })
+                  logger.info(
+                    `OmniVoice designed voice for ${character}: ${design.ref} (${instruct})`
+                  )
+                } catch (e) {
+                  logger.warn(
+                    `OmniVoice design failed for ${character}, keeping survey voice: ${(e as Error).message}`
+                  )
+                }
+              }
+              logger.info(`OmniVoice exclusive voices generated for book ${id}`)
+            } catch (e) {
+              logger.warn(`OmniVoice voice design skipped: ${(e as Error).message}`)
+            }
+          }
         } else if (omniDesigns.length) {
           await setDetail('正在按角色性格分配设计的 Omni 音色…')
           try {
