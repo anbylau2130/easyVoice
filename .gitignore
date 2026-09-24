@@ -32,7 +32,5 @@ rvc-models/**/*.pth
 # Docker 目录映射的持久化数据（生成的音频、模型权重等），不入库
 docker-data/
 
-# OmniVoice 模型预下载缓存（约 2.3GB，运行 download-models 脚本生成，不入库）
-omnivoice-server/models/hf/
-# RVC 训练中间产物（特征缓存等），不入库
+# OmniVoice 模型预下载缓存（约 2.3GB，运行 download-models 脚本生成，不入库）# RVC 训练中间产物（特征缓存等），不入库
 *.npy

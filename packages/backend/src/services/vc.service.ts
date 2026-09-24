@@ -1,4 +1,6 @@
 import fs from 'fs/promises'
+import http from 'node:http'
+import https from 'node:https'
 import path from 'node:path'
 import axios from 'axios'
 import ffmpeg from '../utils/ffmpeg'
@@ -45,6 +47,7 @@ function serviceUrl(
     | '/generate'
     | '/health'
     | '/designs'
+    | '/designs/upload'
     | '/designs/sample'
     | '/designs/delete'
     | '/design-preview'
@@ -214,6 +217,13 @@ export async function listOmniReferences(): Promise<string[]> {
   }
 }
 
+// OmniVoice 调用禁用 keep-alive：合成/编码期间连接长时间空闲，
+// uvicorn 会关闭空闲连接，复用僵死连接会随机报 socket hang up
+const OMNI_AXIOS = {
+  httpAgent: new http.Agent({ keepAlive: false }),
+  httpsAgent: new https.Agent({ keepAlive: false }),
+}
+
 function rateToSpeed(rate?: string): number {
   const percent = Number((rate || '+0%').replace('%', ''))
   if (!Number.isFinite(percent)) return 1.0
@@ -242,6 +252,7 @@ export async function generateOmniVoiceBuffer(text: string, opts: OmniGenerateOp
     // CPU 合成会被无端砍断；axios（node:http）无此限制
     const resp = await axios.post(serviceUrl('omnivoice', '/generate'), form, {
       timeout: 0,
+      ...OMNI_AXIOS,
       responseType: 'arraybuffer',
       maxBodyLength: Infinity,
     })
@@ -296,7 +307,7 @@ async function omniJson<T>(
   fixedPath: '/designs' | '/designs/sample' | '/designs/delete',
   body: unknown
 ): Promise<T> {
-  const resp = await axios.post(serviceUrl('omnivoice', fixedPath), body, { timeout: 0 })
+  const resp = await axios.post(serviceUrl('omnivoice', fixedPath), body, { timeout: 0, ...OMNI_AXIOS })
   return resp.data as T
 }
 
@@ -316,17 +327,31 @@ export async function listOmniDesigns(): Promise<OmniDesign[]> {
 }
 
 /**
- * 保存设计音色：用描述生成固定声纹样本（约 9 秒）并存为参考音频 omni-<name>.wav，
- * 之后与普通参考音色一样按克隆合成，保证全书同一角色声音一致。同名保存=重摇声纹。
+ * 保存设计音色。携带 audio（试听满意的声音纹理，或用户上传的参考音频，任意常见格式）
+ * 时保存该音频为声纹（omnivoice-server 端统一规一化为 24kHz 单声道并裁到 10 秒）；
+ * 未携带时按 instruct 现场生成新声纹（重摇）。同名保存=覆盖。
  */
 export async function saveOmniDesign(payload: {
   name: string
   instruct: string
   gender?: string
+  /** 声纹音频内容（常见音频格式均可，服务端规一化） */
+  audio?: Buffer
 }): Promise<OmniDesign> {
   return enqueueOmniTask(async () => {
-    const data = await omniJson<{ design: OmniDesign }>('/designs', payload)
-    return data.design
+      let data: { design: OmniDesign }
+      if (payload.audio?.length) {
+        const form = new FormData()
+        form.append('name', payload.name)
+        form.append('instruct', payload.instruct)
+        form.append('gender', payload.gender || '')
+        form.append('wav', new Blob([payload.audio], { type: 'audio/wav' }), 'print.wav')
+        const resp = await axios.post(serviceUrl('omnivoice', '/designs/upload'), form, { timeout: 0, ...OMNI_AXIOS })
+        data = resp.data
+      } else {
+        data = await omniJson<{ design: OmniDesign }>('/designs', payload)
+      }
+      return data.design
   })
 }
 
@@ -342,6 +367,7 @@ export async function previewOmniDesign(payload: {
   return enqueueOmniTask(async () => {
     const resp = await axios.post(serviceUrl('omnivoice', '/design-preview'), payload, {
       timeout: 0,
+      ...OMNI_AXIOS,
       responseType: 'arraybuffer',
       maxBodyLength: Infinity,
     })
@@ -355,6 +381,7 @@ export async function previewOmniDesign(payload: {
 export async function getOmniDesignSample(name: string): Promise<Buffer> {
   const resp = await axios.post(serviceUrl('omnivoice', '/designs/sample'), { name }, {
     timeout: 30_000,
+    ...OMNI_AXIOS,
     responseType: 'arraybuffer',
   })
   const wav = Buffer.from(resp.data)

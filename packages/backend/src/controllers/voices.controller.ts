@@ -37,14 +37,18 @@ export async function listOmniDesignsHandler(_req: Request, res: Response) {
   }
 }
 
-/** 保存设计音色：按描述生成声纹样本并固化为参考音频（CPU 较慢，等待完成） */
+/** 保存设计音色：携带 audioBase64（试听满意的声音纹理，或用户上传的参考音频，任意常见
+ * 格式，服务端规一化为 24kHz 单声道并裁到 10 秒）或仅按 instruct 生成新声纹（重摇）。
+ * CPU 生成声纹较慢，等待完成 */
 export async function createOmniDesignHandler(req: Request, res: Response) {
   try {
     const parsed = z
       .object({
         name: z.string().trim().regex(OMNI_DESIGN_NAME_RE, '音色名称仅支持中文/字母/数字/短横线/下划线，长度 1~40'),
-        instruct: z.string().trim().min(1).max(200),
+        instruct: z.string().trim().max(200).default(''),
         gender: z.enum(['female', 'male']).optional(),
+        // base64 编码的声纹音频（wav/mp3 等常见格式）；≤16MB 原始体积
+        audioBase64: z.string().max(22 * 1024 * 1024).optional(),
       })
       .safeParse(req.body ?? {})
     if (!parsed.success) {
@@ -55,7 +59,12 @@ export async function createOmniDesignHandler(req: Request, res: Response) {
       })
       return
     }
-    const design = await saveOmniDesign(parsed.data)
+    const { audioBase64, ...rest } = parsed.data
+    const design = await saveOmniDesign({
+      ...rest,
+      instruct: rest.instruct || '',
+      audio: audioBase64 ? Buffer.from(audioBase64, 'base64') : undefined,
+    })
     res.json({ success: true, code: 200, message: '设计音色已保存', data: design })
   } catch (error) {
     logger.warn(`createOmniDesign failed: ${(error as Error).message}`)

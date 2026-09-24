@@ -116,7 +116,7 @@ docker compose --profile omnivoice up -d --build
    docker run --rm --gpus all easyvoice-omnivoice-server python -c "import torch; print(torch.cuda.is_available())"
    ```
 
-**构建离线性（OmniVoice）**：仓库已内置 CPU 版 torch 轮子（`omnivoice-server/wheels/` 分片）与依赖镜像源回退，常见构建失败点已消除。2.3GB 的模型默认构建期从 hf-mirror 下载；推荐先运行 `omnivoice-server/download-models.bat`（Linux/macOS 用 `.sh`）预下载到本地（支持断点续传），之后构建完全离线。注意 `models/hf/` 不入库，每台构建机预下载一次即可。
+**构建离线性（OmniVoice）**：仓库已内置 CPU 版 torch 轮子（`omnivoice-server/wheels/` 分片）与依赖镜像源回退，构建期网络依赖已降到最低。约 3GB 的模型不进镜像、不进仓库，运行期从 `docker-data/omnivoice-models/hf` 挂载读取：推荐先运行 `omnivoice-server/download-models.bat`（Linux/macOS 用 `.sh`）预下载（支持断点续传）；未预下载时容器首次启动会自动从 hf-mirror 下载。
 
 > CUDA 版 torch 体积较大（镜像约 12GB+，首次构建更久）。没有独显的机器不要叠加 `docker-compose.gpu.yml`（会因找不到 nvidia 驱动而启动失败），按常规方式部署即可。`TORCH_BUILD` 可选 `cu126`/`cu128`：驱动较新（≥ 560）选 cu128，其余选 cu126。
 

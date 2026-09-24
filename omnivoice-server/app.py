@@ -22,7 +22,11 @@ PROMPTS_DIR/<ref>.pt：每个参考只需跑一次 ASR，之后的合成直接�
 克隆合成，保证全书同一角色声音一致。
   POST /design-preview    (json: instruct, text?)        按描述生成试听（不保存）
   GET  /designs           列出已保存的设计
-  POST /designs           (json: name, instruct, gender?)  生成声纹并保存（同名=重摇声纹）
+  POST /designs           (json: name, instruct, gender)  按 instruct 现场生成声纹并保存
+                                                          （同名=重摇；AI 生成模式亦走此接口）
+  POST /designs/upload    (multipart: name, instruct, gender, wav) 保存外部音频为声纹：
+                          试听满意的声音纹理，或用户上传的参考音频（规一化为 24kHz
+                          单声道并裁到 10 秒）
   POST /designs/sample    (json: name)                    取已保存的声纹样本（不推理）
   POST /designs/delete    (json: name)                    删除设计（声纹+缓存+登记）
 （name 走 body 而非路径参数：服务端 URL 保持固定路径，动态参数集中校验）
@@ -32,11 +36,13 @@ import io
 import json
 import os
 import re
+import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
 
-from fastapi import Body, FastAPI, Form
+from fastapi import Body, FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse, Response
 
 MODEL_ID = os.environ.get('OMNIVOICE_MODEL_ID', 'k2-fsa/OmniVoice')
@@ -280,6 +286,7 @@ def list_designs() -> dict:
 
 @app.post('/designs')
 def create_design(body: dict = Body(...)) -> dict:
+    """按 instruct 现场生成新声纹并保存（同名=重摇；供「重摇」按钮与 AI 生成模式调用）"""
     name = str(body.get('name') or '').strip()
     instruct = str(body.get('instruct') or '').strip()
     gender = str(body.get('gender') or '').strip().lower()
@@ -291,12 +298,12 @@ def create_design(body: dict = Body(...)) -> dict:
     if not instruct:
         return JSONResponse(status_code=400, content={'message': '缺少声音描述 instruct'})
     try:
-        wav = generate_by_instruct(instruct, VOICE_PRINT_TEXT)
+        wav_bytes = generate_by_instruct(instruct, VOICE_PRINT_TEXT)
     except Exception as exc:
         return JSONResponse(status_code=500, content={'message': f'声纹生成失败：{exc}'})
     ref = design_ref(name)
     REFS_DIR.mkdir(parents=True, exist_ok=True)
-    (REFS_DIR / f'{ref}.wav').write_bytes(wav)
+    (REFS_DIR / f'{ref}.wav').write_bytes(wav_bytes)
     with _designs_lock:
         designs = load_designs()
         designs[name] = {
@@ -306,8 +313,63 @@ def create_design(body: dict = Body(...)) -> dict:
             'createdAt': int(time.time()),
         }
         save_designs(designs)
-    print(f'[omnivoice-server] design saved: {ref} ({instruct})', flush=True)
+    print(f'[omnivoice-server] design saved (instruct, {len(wav_bytes)}B): {ref} ({instruct})', flush=True)
     return {'design': dict(designs[name], name=name)}
+
+
+@app.post('/designs/upload')
+async def upload_design(
+    name: str = Form(''),
+    instruct: str = Form(''),
+    gender: str = Form(''),
+    wav: UploadFile = File(...),
+) -> dict:
+    """保存外部音频为设计声纹（试听满意的声音纹理，或用户上传的参考音频）。
+    音频统一规一化为 24kHz 单声道 wav 并裁到 10 秒内（官方建议参考音频 3~10 秒）"""
+    name = name.strip()
+    instruct = instruct.strip()
+    gender = gender.strip().lower()
+    if not DESIGN_NAME_RE.match(name):
+        return JSONResponse(
+            status_code=400,
+            content={'message': '音色名称仅支持中文/字母/数字/短横线/下划线，长度 1~40'},
+        )
+    data = await wav.read()
+    if not data:
+        return JSONResponse(status_code=400, content={'message': '音频内容为空'})
+    ref = design_ref(name)
+    ref_path = REFS_DIR / f'{ref}.wav'
+    REFS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        normalize_to_wav(data, ref_path)
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={'message': f'声纹音频规一化失败：{exc}'})
+    with _designs_lock:
+        designs = load_designs()
+        designs[name] = {
+            'ref': ref,
+            'instruct': instruct,
+            'gender': gender if gender in ('female', 'male') else '',
+            'createdAt': int(time.time()),
+        }
+        save_designs(designs)
+    print(f'[omnivoice-server] design saved (uploaded, {ref_path.stat().st_size}B): {ref} ({instruct})', flush=True)
+    return {'design': dict(designs[name], name=name)}
+
+
+def normalize_to_wav(data: bytes, out_path: Path) -> None:
+    """任意音频输入 → 24kHz 单声道 16bit wav，裁到 10 秒内（克隆参考的推荐上限）"""
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / 'src.audio'
+        src.write_bytes(data)
+        subprocess.run(
+            ['ffmpeg', '-y', '-i', str(src), '-t', '10', '-ar', '24000', '-ac', '1',
+             '-c:a', 'pcm_s16le', str(out_path)],
+            check=True,
+            capture_output=True,
+        )
+        if not out_path.is_file() or out_path.stat().st_size < 1000:
+            raise RuntimeError('音频解码结果为空或过短')
 
 
 @app.post('/designs/sample')

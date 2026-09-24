@@ -172,18 +172,41 @@ export const listOmniDesigns = async (): Promise<OmniDesign[]> => {
   return response.data.data || []
 }
 
-/** 保存设计音色：按描述生成声纹样本并固化（CPU 较慢，不设超时等待完成） */
+/**
+ * 保存设计音色。携带 audio（Blob：试听满意的声音纹理，或用户上传的参考音频，任意常见
+ * 格式，后端规一化为 24kHz 单声道并裁到 10 秒）；未携带时按 instruct 现场生成新声纹（重摇）。
+ * CPU 生成较慢，不设超时等待完成
+ */
 export const createOmniDesign = async (payload: {
   name: string
   instruct: string
   gender?: string
+  audio?: Blob
 }): Promise<OmniDesign> => {
+  let audioBase64: string | undefined
+  if (payload.audio?.size) {
+    audioBase64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result).split(',')[1] || '')
+      reader.onerror = () => reject(new Error('读取音频失败'))
+      reader.readAsDataURL(payload.audio!)
+    })
+  }
   const response = await api.post<{
     success: boolean
     code: number
     message?: string
     data: OmniDesign
-  }>('/omni-designs', payload, { timeout: 0 })
+  }>(
+    '/omni-designs',
+    {
+      name: payload.name,
+      instruct: payload.instruct,
+      gender: payload.gender,
+      audioBase64,
+    },
+    { timeout: 0, maxBodyLength: Infinity }
+  )
   if (response.data?.code !== 200) {
     throw new Error(response.data?.message || '保存设计音色失败')
   }

@@ -41,22 +41,16 @@ COPY requirements.txt .
 RUN (pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple \
  || pip install --no-cache-dir -r requirements.txt)
 
-# 模型预置（本层在 COPY app.py 之前，改动 app.py 不触发模型重下）：
-# 优先使用本地预下载的 HF 缓存（运行仓库提供的 download-models 脚本生成到 models/hf/，
-# 构建期零网络依赖）；models/hf 为空时构建期从 hf-mirror 下载。
+# 模型不进镜像（约 3GB）：构建期零模型下载、构建上下文轻量稳定。
+# 运行期从挂载的 HF 缓存读取（推荐先运行 download-models 脚本预下载到
+# docker-data/omnivoice-models/hf）；缓存为空时入口脚本自动从 hf-mirror 下载。
 # HF_HUB_DISABLE_XET：新版 huggingface_hub 默认走 Xet 协议，其 CAS 端点直连官方且
 # 需要鉴权（hf-mirror 不代理），401 失败；禁用后回退普通 HTTP 下载，hf-mirror 可完整加速
 ENV HF_ENDPOINT=https://hf-mirror.com \
     HF_HUB_DISABLE_XET=1
-COPY models/ ./models-src/
-RUN { [ -d models-src/hf ] && [ -n "$(ls -A models-src/hf 2>/dev/null)" ]; } \
- && mkdir -p /root/.cache/huggingface && cp -a models-src/hf/. /root/.cache/huggingface/ \
- && echo "[build] models: using pre-downloaded local cache" \
- || { echo "[build] models: downloading from hf-mirror ..."; \
-      python -c "from huggingface_hub import snapshot_download; \
-      snapshot_download('k2-fsa/OmniVoice'); \
-      snapshot_download('openai/whisper-small', allow_patterns=['*.json', '*.txt', '*.model', 'model.safetensors'])"; } \
- && du -sh /root/.cache/huggingface && rm -rf models-src
+
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 COPY app.py .
 
@@ -70,6 +64,7 @@ ENV OMNIVOICE_MODEL_ID=k2-fsa/OmniVoice \
     MALLOC_ARENA_MAX=2
 RUN mkdir -p /app/references /app/prompts
 
-# 注意：不要挂载 /root/.cache/huggingface —— 空目录会遮蔽镜像内预置的模型
+# 注意：模型缓存在运行期挂载，不要再挂载/覆盖 /root/.cache/huggingface 以外的东西
 EXPOSE 9092
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "9092"]
