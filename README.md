@@ -338,6 +338,25 @@ pnpm dev
 - **配置文件**：可在 `.env` 或 `packages/backend/.env` 中设置，优先级为 `packages/backend/.env > .env`。  
 - **Docker 配置**：通过 `-e` 参数传入环境变量，如上文示例。
 
+## 防止整机卡死（Docker Desktop / WSL2 内存配置）
+
+Docker Desktop 的 WSL2 虚拟机默认可占用宿主机一半内存；容器推理的内存峰值会挤压
+Windows 导致整机卡死。三道防护（omnivoice-server 已内置前两道）：
+
+1. **长文本切片合成**：omnivoice-server 自动把长文本按句切分逐段合成，内存峰值有界
+2. **容器内存上限**：omnivoice-server 限制 5GB（`docker-compose.yml` 可调）
+3. **限制 WSL2 虚拟机本身**（强烈建议，需管理员创建/修改 `%UserProfile%\.wslconfig`）：
+
+```ini
+[wsl2]
+memory=6GB
+swap=8GB
+autoMemoryReclaim=gradual
+```
+
+修改后执行 `wsl --shutdown` 并重启 Docker Desktop 生效。`memory` 建议为宿主机内存的
+1/3~1/2；`swap` 让偶发峰值走磁盘而不是拖垮系统。
+
 ## FAQ
 
 - **Q: 如何配置 OpenAI 相关信息?**

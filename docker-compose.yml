@@ -177,8 +177,9 @@ services:
     profiles: ['omnivoice']
     ports:
       - '9092:9092'
-    # 约 0.8B 模型 fp32 常驻约 4GB（编码参考音频时另加载 Whisper）：限制内存防止拖垮 Docker 虚拟机
-    mem_limit: 6g
+    # 内存上限：约 0.8B 模型 fp32 常驻约 3GB，长文本已切片合成、峰值有界；
+    # 上限压低以保护 Docker 虚拟机（虚拟机自身的内存上限见 README 的 .wslconfig 说明）
+    mem_limit: 5g
     dns:
       - 223.5.5.5
       - 119.29.29.29

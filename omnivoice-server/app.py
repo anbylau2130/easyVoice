@@ -185,6 +185,70 @@ def references() -> dict:
     return {'references': scan_reference_names()}
 
 
+def split_for_generation(text: str, limit: int = 60) -> list:
+    """长文本按句边界切分为 ≤limit 字的片段：单次生成长音频会让扩散激活内存
+    随音频时长线性膨胀（内存峰值无上界，可直接挤爆容器/虚拟机导致宿主机卡死），
+    切片逐段合成把内存峰值锁定在有界范围，同时每段之间释放内存"""
+    import re
+
+    text = (text or '').strip()
+    if len(text) <= limit:
+        return [text] if text else []
+    pieces: list = []
+    buf = ''
+    for part in re.split(r'(?<=[。！？!?；;])', text):
+        if not part:
+            continue
+        while len(part) > limit:  # 无句读的超长段硬切
+            pieces.append(part[:limit])
+            part = part[limit:]
+        if buf and len(buf) + len(part) > limit:
+            pieces.append(buf)
+            buf = part
+        else:
+            buf += part
+    if buf:
+        pieces.append(buf)
+    return pieces or [text]
+
+
+def synthesize_clone(model, prompt, text: str, speed: float):
+    """按声纹克隆合成（自动长文本切片逐段生成），返回拼接后的 24kHz float32 数组"""
+    import numpy as np
+
+    outs = []
+    for piece in split_for_generation(text):
+        with _infer_lock:
+            audio = model.generate(
+                text=piece,
+                voice_clone_prompt=prompt,
+                speed=clamp_speed(speed),
+                num_step=NUM_STEP,
+            )
+        outs.extend(np.asarray(chunk, dtype='float32') for chunk in audio if len(chunk))
+    # 切片循环内不做内存归还：malloc_trim 会连同 mmap 的模型权重页一起释放，
+    # 下一段推理需从磁盘重新换入数 GB 页面，速度骤降
+    release_memory()
+    return outs
+
+
+def synthesize_instruct(model, instruct: str, text: str):
+    """按描述合成（同样长文本切片），返回拼接后的 24kHz float32 数组"""
+    import numpy as np
+
+    outs = []
+    for piece in split_for_generation(text):
+        with _infer_lock:
+            audio = model.generate(
+                text=piece,
+                instruct=instruct,
+                num_step=NUM_STEP,
+            )
+        outs.extend(np.asarray(chunk, dtype='float32') for chunk in audio if len(chunk))
+    release_memory()
+    return outs
+
+
 @app.post('/generate')
 def generate(
     text: str = Form(''),
@@ -205,23 +269,15 @@ def generate(
     prompt = get_prompt(model, name)
     if prompt is None:
         return JSONResponse(status_code=404, content={'message': f'参考音色编码失败：{name}'})
-    with _infer_lock:
-        audio = model.generate(
-            text=text,
-            voice_clone_prompt=prompt,
-            speed=clamp_speed(speed),
-            num_step=NUM_STEP,
-        )
-    release_memory()
-    # 返回 list[np.ndarray]（24kHz）：拼接为一条 16bit PCM wav
+    audio = synthesize_clone(model, prompt, text, speed)
+    # 返回 24kHz 数组：拼接为一条 16bit PCM wav
     import numpy as np
     import soundfile as sf
 
-    chunks = [np.asarray(chunk, dtype='float32') for chunk in audio if len(chunk)]
-    if not chunks:
+    if not len(audio):
         return JSONResponse(status_code=500, content={'message': '合成结果为空'})
     buf = io.BytesIO()
-    sf.write(buf, np.concatenate(chunks), 24000, format='WAV', subtype='PCM_16')
+    sf.write(buf, np.concatenate(audio), 24000, format='WAV', subtype='PCM_16')
     return Response(content=buf.getvalue(), media_type='audio/wav')
 
 
@@ -248,14 +304,11 @@ def generate_by_instruct(instruct: str, text: str) -> bytes:
     import soundfile as sf
 
     model = get_model()
-    with _infer_lock:
-        audio = model.generate(text=text, instruct=instruct, num_step=NUM_STEP)
-    release_memory()
-    chunks = [np.asarray(chunk, dtype='float32') for chunk in audio if len(chunk)]
-    if not chunks:
+    audio = synthesize_instruct(model, instruct, text)
+    if not len(audio):
         raise RuntimeError('合成结果为空')
     buf = io.BytesIO()
-    sf.write(buf, np.concatenate(chunks), 24000, format='WAV', subtype='PCM_16')
+    sf.write(buf, np.concatenate(audio), 24000, format='WAV', subtype='PCM_16')
     return buf.getvalue()
 
 
@@ -404,17 +457,14 @@ def design_sample(body: dict = Body(...)) -> Response:
     prompt = get_prompt(model, ref)
     if prompt is None:
         return JSONResponse(status_code=404, content={'message': f'声纹编码失败：{name}'})
-    with _infer_lock:
-        audio = model.generate(text=SAMPLE_TEXT, voice_clone_prompt=prompt, num_step=NUM_STEP)
-    release_memory()
+    audio = synthesize_clone(model, prompt, SAMPLE_TEXT, 1.0)
     import numpy as np
     import soundfile as sf
 
-    chunks = [np.asarray(chunk, dtype='float32') for chunk in audio if len(chunk)]
-    if not chunks:
+    if not len(audio):
         return JSONResponse(status_code=500, content={'message': '合成结果为空'})
     buf = io.BytesIO()
-    sf.write(buf, np.concatenate(chunks), 24000, format='WAV', subtype='PCM_16')
+    sf.write(buf, np.concatenate(audio), 24000, format='WAV', subtype='PCM_16')
     cache_path.write_bytes(buf.getvalue())
     print(f'[omnivoice-server] sample synthesized & cached: {cache_path.name}', flush=True)
     return Response(content=buf.getvalue(), media_type='audio/wav')
